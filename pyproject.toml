@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-renac-bridge = "renac_ha_mqtt_bridge.__main__:main"
+renac-bridge = "renac_ha_bridge.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
