@@ -6,14 +6,14 @@ from typing import Any, Callable, Awaitable, Optional
 from renac_ble import RenacWallboxBLE, RenacInverterBLE
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
 
-MQTT_HOST = os.getenv("MQTT_HOST", "ha.voluzi.internal")
+MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
 MQTT_USER = os.getenv("MQTT_USER", "renacble")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "renacble")
 MQTT_PREFIX = os.getenv("MQTT_PREFIX", "homeassistant")
 
-INVERTER_ADDR = os.getenv("RENAC_INVERTER_ADDR")       # e.g., "28:9C:6E:92:7C:F6"
-WALLBOX_ADDR  = os.getenv("RENAC_WALLBOX_ADDR")        # e.g., "E8:FD:F8:D4:A1:75"
+INVERTER_ADDR = os.getenv("RENAC_INVERTER_ADDR")
+WALLBOX_ADDR = os.getenv("RENAC_WALLBOX_ADDR")
 
 shutdown_event = asyncio.Event()
 
@@ -42,6 +42,7 @@ def wallbox_callback(parsed):
 def wrap_async_callback(loop: asyncio.AbstractEventLoop, coro_func: Callable[[Any], Awaitable[Optional[bool]]]):
     def wrapper(value: Any) -> None:
         asyncio.run_coroutine_threadsafe(coro_func(value), loop)
+
     return wrapper
 
 
