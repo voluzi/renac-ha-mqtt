@@ -1,4 +1,3 @@
-# renac_ha_mqtt_bridge/__init__.py
 from importlib.metadata import PackageNotFoundError, version as _version
 
 try:

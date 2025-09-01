@@ -23,7 +23,7 @@ This repository contains two related Python packages:
 ## 📦 Installation
 
 ```bash
-pip install renac-ha-mqtt
+pip install "git+https://github.com/voluzi/renac-ha-mqtt.git@main"
 ```
 
 This installs both `renac_ha_mqtt` and `renac_ha_bridge`, along with the `renac-bridge` CLI.
