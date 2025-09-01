@@ -16,7 +16,7 @@ This repository contains two related Python packages:
 - Exposes control actuators (charge/discharge limits, Min SoC, export limits, …)
 - Fully compatible with **Home Assistant MQTT Discovery**
 - Works with **any RENAC backend** (BLE, cloud, or others)
-- Includes a ready-to-use **bridge CLI** (`renac-bridge`) for BLE ↔ MQTT
+- Includes a ready-to-use **bridge CLI** (`renac-ble-ha-bridge`) for BLE ↔ MQTT
 
 ---
 
@@ -26,7 +26,7 @@ This repository contains two related Python packages:
 pip install "git+https://github.com/voluzi/renac-ha-mqtt.git@main"
 ```
 
-This installs both `renac_ha_mqtt` and `renac_ha_bridge`, along with the `renac-bridge` CLI.
+This installs both `renac_ha_mqtt` and `renac_ha_bridge`, along with the `renac-ble-ha-bridge` CLI.
 
 ---
 
@@ -72,7 +72,7 @@ RENAC_WALLBOX_ADDR="E8:FD:F8:D4:A1:75" \
 MQTT_HOST="192.168.1.10" \
 MQTT_USER="renacble" \
 MQTT_PASSWORD="renacble" \
-renac-bridge
+renac-ble-ha-bridge
 ```
 
 This will connect to both the inverter and the wallbox via BLE and publish their telemetry/control entities into Home Assistant.
