@@ -1,16 +1,20 @@
+"""Entry point for the RENAC Home Assistant bridge."""
+
 import asyncio
 import os
 import signal
-from typing import Any, Callable, Awaitable, Optional
+import logging
+from typing import Any, Callable, Awaitable, Optional, Dict
 
 from renac_ble import RenacWallboxBLE, RenacInverterBLE
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
+
+logging.basicConfig(level=logging.INFO)
 
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
 MQTT_USER = os.getenv("MQTT_USER", "renacble")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "renacble")
-MQTT_PREFIX = os.getenv("MQTT_PREFIX", "homeassistant")
 
 INVERTER_ADDR = os.getenv("RENAC_INVERTER_ADDR")
 WALLBOX_ADDR = os.getenv("RENAC_WALLBOX_ADDR")
@@ -23,7 +27,8 @@ wallbox_mqtt: Optional[RenacWallboxDevice] = None
 wallbox_excluded_keys = {"sn", "model", "manufacturer", "version", "update_time"}
 
 
-def wallbox_callback(parsed):
+def wallbox_callback(parsed: Dict[str, Any]) -> None:
+    """Forward wallbox telemetry to MQTT."""
     global wallbox_mqtt
     if wallbox_mqtt is None:
         wallbox_mqtt = RenacWallboxDevice(
@@ -39,14 +44,24 @@ def wallbox_callback(parsed):
     wallbox_mqtt.set_sensor_value({k: v for k, v in parsed.items() if k not in wallbox_excluded_keys})
 
 
-def wrap_async_callback(loop: asyncio.AbstractEventLoop, coro_func: Callable[[Any], Awaitable[Optional[bool]]]):
-    def wrapper(value: Any) -> None:
-        asyncio.run_coroutine_threadsafe(coro_func(value), loop)
+def wrap_async_callback(loop: asyncio.AbstractEventLoop,
+                        coro_func: Callable[[Any], Awaitable[Optional[bool]]]) -> Callable[[Any], Optional[bool]]:
+    """Wrap an ``async`` function so it can be used as a synchronous callback."""
+
+    def wrapper(value: Any) -> Optional[bool]:
+        future = asyncio.run_coroutine_threadsafe(coro_func(value), loop)
+        try:
+            return future.result()
+        except Exception as exc:  # pragma: no cover - best effort logging
+            logging.error("Error executing %s: %s", coro_func.__name__, exc)
+            return False
 
     return wrapper
 
 
-async def run_bridge(inverter_addr: str, wallbox_addr: str):
+async def run_bridge(inverter_addr: str, wallbox_addr: str) -> None:
+    """Connect to RENAC devices and forward telemetry to MQTT."""
+
     global inverter_mqtt
 
     inverter = RenacInverterBLE(inverter_addr)
@@ -55,7 +70,7 @@ async def run_bridge(inverter_addr: str, wallbox_addr: str):
     while not shutdown_event.is_set():
         try:
             await inverter.connect()
-            print("⚡️ Connected to inverter")
+            logging.info("⚡️ Connected to inverter")
             info = await inverter.get_info()
             inverter_mqtt = RenacInverterDevice(
                 "RENAC Inverter",
@@ -101,7 +116,7 @@ async def run_bridge(inverter_addr: str, wallbox_addr: str):
             )
 
             await wallbox.connect()
-            print("⚡️ Connected to wallbox")
+            logging.info("⚡️ Connected to wallbox")
 
             while not shutdown_event.is_set():
                 result = await inverter.get_power_and_energy_overview()
@@ -110,19 +125,23 @@ async def run_bridge(inverter_addr: str, wallbox_addr: str):
                     raise ConnectionError("Wallbox is disconnected")
                 await asyncio.sleep(5)
 
-        except Exception as e:
-            print(f"Error in loop: {e}. Retrying in 5s...")
+        except Exception:  # pragma: no cover - best effort logging
+            logging.exception("Error in loop. Retrying in 5s...")
             await asyncio.sleep(5)
         finally:
             await inverter.disconnect()
             await wallbox.disconnect()
 
 
-def _shutdown_handler():
+def _shutdown_handler() -> None:
+    """Signal handler to stop the bridge."""
+
     shutdown_event.set()
 
 
-def main():
+def main() -> None:
+    """CLI entry point."""
+
     inv = INVERTER_ADDR
     wb = WALLBOX_ADDR
     if not inv or not wb:

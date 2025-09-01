@@ -1,16 +1,13 @@
+"""MQTT device helpers for RENAC hardware."""
+
 import time
 import json
 import logging
 import paho.mqtt.client as mqtt
-from typing import Callable, TypedDict, Optional, Dict, Union
+from typing import Any, Callable, TypedDict, Optional, Dict, Union, List
 
-# Setup base logger configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-
-ActuatorCallback = Callable[[Union[int, float, str, bool, dict, list]], Optional[bool]]
+ActuatorPayload = Union[int, float, str, bool, Dict[str, Any], List[Any]]
+ActuatorCallback = Callable[[ActuatorPayload], Optional[bool]]
 
 
 class SensorConfig(TypedDict, total=False):
@@ -33,6 +30,8 @@ class MqttDeviceEntities(TypedDict, total=False):
 
 
 class RenacMqttDevice:
+    """Base MQTT device used by the bridge to publish telemetry and accept commands."""
+
     def __init__(self,
                  device_id: str,
                  device_name: str,
@@ -65,17 +64,23 @@ class RenacMqttDevice:
         self.client.on_message = self.on_message
         self._connected = False
 
-    def connect(self):
+    def connect(self) -> None:
+        """Connect to the configured MQTT broker and start the network loop."""
         self.logger.info("🚀 Connecting to MQTT broker...")
         self.client.connect(self.mqtt_host, self.mqtt_port, 60)
         self.client.loop_start()
         self.logger.info("📡 MQTT loop started")
 
-    def disconnect(self):
+    def disconnect(self) -> None:
+        """Disconnect from the MQTT broker."""
         self.client.loop_stop()
         self.client.disconnect()
 
-    def publish(self, topic: str, payload, retain: bool = False):
+    def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
+        """Publish ``payload`` on ``topic``.
+
+        ``payload`` is JSON-encoded if it is a mapping or sequence.
+        """
         if isinstance(payload, (dict, list)):
             payload = json.dumps(payload)
         self.client.publish(topic, payload, retain=retain)
@@ -91,16 +96,24 @@ class RenacMqttDevice:
             self.logger.error(f"❌ MQTT connect failed, code {rc}")
 
     def on_disconnect(self, client, userdata, rc):
+        """Attempt to reconnect using an exponential backoff strategy."""
         self.logger.warning("⚠️ MQTT disconnected. Reconnecting...")
         self._connected = False
-        while not self._connected:
+        delay = 1
+        attempts = 0
+        while not self._connected and attempts < 10:
             try:
                 client.reconnect()
                 self.logger.info("✅ MQTT reconnected")
+                self._connected = True
                 return
             except Exception as e:
                 self.logger.error(f"❌ Reconnect failed: {e}")
-                time.sleep(5)
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                attempts += 1
+        if not self._connected:
+            self.logger.error("❌ Failed to reconnect to MQTT after multiple attempts")
 
     def on_message(self, client, userdata, msg):
         topic_parts = msg.topic.split('/')
@@ -177,14 +190,20 @@ class RenacMqttDevice:
             self.client.subscribe(f"{base_topic}/set")
             self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
 
-    def _set_state(self, key: str, value: any):
+    def _set_state(self, key: str, value: Any) -> bool:
+        """Store ``value`` in the internal state if it changed."""
         if self.state.get(key) != value:
             self.logger.debug(f"🔄 State updated: {key} = {value}")
             self.state[key] = value
             return True
         return False
 
-    def set_sensor_value(self, key_or_dict: Union[str, Dict[str, any]], value: Optional[any] = None):
+    def set_sensor_value(self, key_or_dict: Union[str, Dict[str, Any]], value: Optional[Any] = None) -> bool:
+        """Update sensor state and publish MQTT messages.
+
+        ``key_or_dict`` may be either a single sensor key or a mapping of
+        keys to values. Only changed values are published.
+        """
         updates = {}
         if isinstance(key_or_dict, dict):
             for k, v in key_or_dict.items():
@@ -204,8 +223,9 @@ class RenacMqttDevice:
         return bool(updates)
 
     def get_entity_type(self, key: str) -> Optional[str]:
+        """Return the entity category for ``key`` if present."""
         for entity_type, entity_dict in self.entities.items():
-            if isinstance(entity_type, str) and key in entity_dict:
+            if key in entity_dict:
                 return entity_type
         return None
 
