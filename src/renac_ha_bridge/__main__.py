@@ -97,7 +97,7 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
         if dev is None:
             # Build device on first telemetry (we need serial/model)
             dev = RenacWallboxDevice(
-                device_name=f"RENAC Wallbox ({ble_addr})",
+                device_name=f"RENAC Wallbox",
                 serial_number=parsed.get("sn"),
                 model=parsed.get("model"),
                 mqtt_host=MQTT_HOST,
@@ -154,7 +154,7 @@ async def run_inverter_task(ble_addr: str) -> None:
 
             info = await inverter.get_info()
             mqtt_dev = RenacInverterDevice(
-                device_name=f"RENAC Inverter ({ble_addr})",
+                device_name=f"RENAC Inverter",
                 serial_number=info.get("sn"),
                 model=info.get("model"),
                 mqtt_host=MQTT_HOST,
