@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 import logging
+import time
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
 from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode
@@ -29,6 +30,8 @@ INVERTER_ADDRS = os.getenv("RENAC_INVERTER_ADDRS", "")
 WALLBOX_ADDRS = os.getenv("RENAC_WALLBOX_ADDRS", "")
 
 POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
+# Separate interval for refreshing actuator states
+ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
 
 shutdown_event = asyncio.Event()
 
@@ -210,10 +213,46 @@ async def run_inverter_task(ble_addr: str) -> None:
                 current_mode.name.lower() if current_mode is not None else None,
             )
 
+            last_actuator_poll = time.monotonic()
+
             # Poll & publish inverter overview periodically
             while not shutdown_event.is_set():
                 overview = await inverter.get_power_and_energy_overview()
                 mqtt_dev.set_sensor_value(overview)
+
+                now = time.monotonic()
+                if now - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
+                    last_actuator_poll = now
+                    mqtt_dev.set_actuator_value(
+                        "max_charge_current",
+                        await inverter.get_max_charge_current(),
+                    )
+                    mqtt_dev.set_actuator_value(
+                        "max_discharge_current",
+                        await inverter.get_max_discharge_current(),
+                    )
+                    mqtt_dev.set_actuator_value(
+                        "min_soc",
+                        await inverter.get_min_soc(),
+                    )
+                    mqtt_dev.set_actuator_value(
+                        "min_soc_on_grid",
+                        await inverter.get_min_soc_on_grid(),
+                    )
+                    mqtt_dev.set_actuator_value(
+                        "export_limit",
+                        await inverter.get_export_limit(),
+                    )
+                    mqtt_dev.set_actuator_value(
+                        "power_limit_percent",
+                        await inverter.get_power_limit_percent(),
+                    )
+                    work_mode = await inverter.get_work_mode()
+                    mqtt_dev.set_actuator_value(
+                        "work_mode",
+                        work_mode.name.lower() if work_mode is not None else None,
+                    )
+
                 if not inverter.is_connected():
                     raise ConnectionError(f"Inverter {ble_addr} disconnected")
                 await asyncio.sleep(POLL_INTERVAL_S)

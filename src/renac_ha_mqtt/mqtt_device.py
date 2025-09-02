@@ -263,3 +263,15 @@ class RenacMqttDevice:
             topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
             self.client.publish(topic, value, retain=True)
             self.logger.info(f"📤 Initial state published for actuator {key}: {value}")
+
+    def set_actuator_value(self, key: str, value: ActuatorPayload) -> bool:
+        """Update actuator state and publish MQTT message if it changed."""
+        if self._set_state(key, value):
+            entity_type = self.get_entity_type(key)
+            if entity_type is None:
+                return False
+            topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
+            self.client.publish(topic, value, retain=True)
+            self.logger.info(f"📤 Published actuator update: {key} = {value}")
+            return True
+        return False
