@@ -24,9 +24,14 @@ class NumberConfig(TypedDict, total=False):
     mode: str
 
 
+class SelectConfig(TypedDict, total=False):
+    options: List[str]
+
+
 class MqttDeviceEntities(TypedDict, total=False):
     sensor: Dict[str, SensorConfig]
     number: Dict[str, NumberConfig]
+    select: Dict[str, SelectConfig]
 
 
 class RenacMqttDevice:
@@ -124,9 +129,8 @@ class RenacMqttDevice:
             if key in self._actuator_callbacks:
                 try:
                     value = json.loads(payload)
-                except json.JSONDecodeError as e:
-                    self.logger.warning(f"❌ Failed to parse JSON payload for {key}: {payload} ({e})")
-                    return
+                except json.JSONDecodeError:
+                    value = payload
 
                 callback = self._actuator_callbacks[key]
                 self.logger.info(f"🔧 Received command for {key}: {value}")
@@ -187,6 +191,27 @@ class RenacMqttDevice:
                 },
             }
             config.update(number)
+            self.client.subscribe(f"{base_topic}/set")
+            self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
+
+        for key, select in self.entities.get("select", {}).items():
+            base_topic = f"homeassistant/select/{self.device_id}/{key}"
+            config = {
+                "name": f"{self.device_name} {key.replace('_', ' ').title()}",
+                "state_topic": f"{base_topic}/state",
+                "command_topic": f"{base_topic}/set",
+                "unique_id": f"{self.device_id}_{key}",
+                "availability_topic": f"homeassistant/{self.device_id}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "device": {
+                    "identifiers": [self.device_id],
+                    "name": self.device_name,
+                    "manufacturer": "RENAC",
+                    "model": self.device_model,
+                },
+            }
+            config.update(select)
             self.client.subscribe(f"{base_topic}/set")
             self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
 

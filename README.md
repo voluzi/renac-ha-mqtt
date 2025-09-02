@@ -13,7 +13,7 @@ This repository contains two related Python packages:
 ## ✨ Features
 - Models RENAC devices as Home Assistant MQTT entities
 - Publishes telemetry as sensors
-- Exposes control actuators (charge/discharge limits, Min SoC, export limits, …)
+- Exposes control actuators (charge/discharge limits, Min SoC, export limits, work mode, …)
 - Fully compatible with **Home Assistant MQTT Discovery**
 - Works with **any RENAC backend** (BLE, cloud, or others)
 - Includes a ready-to-use **bridge CLI** (`renac-ble-ha-bridge`) for BLE ↔ MQTT

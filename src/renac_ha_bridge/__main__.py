@@ -6,7 +6,7 @@ import signal
 import logging
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
-from renac_ble import RenacWallboxBLE, RenacInverterBLE
+from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +195,19 @@ async def run_inverter_task(ble_addr: str) -> None:
                 "power_limit_percent",
                 wrap_async_callback(loop, inverter.set_power_limit_percent),
                 await inverter.get_power_limit_percent(),
+            )
+            async def _set_work_mode(value: str) -> bool:
+                try:
+                    mode = WorkMode[value.upper()]
+                except KeyError:
+                    return False
+                return await inverter.set_work_mode(mode)
+
+            current_mode = await inverter.get_work_mode()
+            mqtt_dev.set_actuator_callback(
+                "work_mode",
+                wrap_async_callback(loop, _set_work_mode),
+                current_mode.name.lower() if current_mode is not None else None,
             )
 
             # Poll & publish inverter overview periodically

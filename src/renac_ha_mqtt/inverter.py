@@ -46,6 +46,16 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
             "mode": "box"
         },
     },
+    "select": {
+        "work_mode": {
+            "options": [
+                "self_use",
+                "force_time_use",
+                "backup",
+                "feed_in_first",
+            ],
+        }
+    },
     "sensor": {
         # Real-time values
         "load_power": {
