@@ -97,8 +97,8 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
         if dev is None:
             # Build device on first telemetry (we need serial/model)
             dev = RenacWallboxDevice(
-                name=f"RENAC Wallbox ({ble_addr})",
-                serial=parsed.get("sn"),
+                device_name=f"RENAC Wallbox ({ble_addr})",
+                serial_number=parsed.get("sn"),
                 model=parsed.get("model"),
                 mqtt_host=MQTT_HOST,
                 mqtt_port=MQTT_PORT,
@@ -154,8 +154,8 @@ async def run_inverter_task(ble_addr: str) -> None:
 
             info = await inverter.get_info()
             mqtt_dev = RenacInverterDevice(
-                name=f"RENAC Inverter ({ble_addr})",
-                serial=info.get("sn"),
+                device_name=f"RENAC Inverter ({ble_addr})",
+                serial_number=info.get("sn"),
                 model=info.get("model"),
                 mqtt_host=MQTT_HOST,
                 mqtt_port=MQTT_PORT,
@@ -261,3 +261,6 @@ def main() -> None:
             pass  # Windows
 
     loop.run_until_complete(_run_all(inverter_addrs, wallbox_addrs))
+
+if __name__ == "__main__":
+    main()

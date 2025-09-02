@@ -1,0 +1,21 @@
+services:
+  renac-ble-ha-bridge:
+    image: ghcr.io/voluzi/renac-ha-mqtt
+    container_name: renac-ble-ha-bridge
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /var/run/dbus:/var/run/dbus:rw
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    command: --interval 30 --label-enable --cleanup --rolling-restart
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
