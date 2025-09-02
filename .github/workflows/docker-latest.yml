@@ -40,6 +40,8 @@ jobs:
           push: true
           platforms: ${{ matrix.build.platform }}
           tags: ghcr.io/${{ github.repository }}:latest-${{ matrix.build.suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   merge:
     needs: build
