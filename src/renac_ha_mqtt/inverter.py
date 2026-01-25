@@ -45,6 +45,86 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
             "step": 1,
             "mode": "box"
         },
+        # Force Time Use Mode - Period 1
+        "force_time_p1_start_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p1_start_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p1_end_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p1_end_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+        # Force Time Use Mode - Period 2
+        "force_time_p2_start_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p2_start_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p2_end_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "force_time_p2_end_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+        # Backup Mode Grid Charge
+        "backup_charge_start_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "backup_charge_start_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+        "backup_charge_end_hour": {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "mode": "box"
+        },
+        "backup_charge_end_minute": {
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "mode": "box"
+        },
+    },
+    "switch": {
+        "force_time_p1_enabled": {},
+        "force_time_p2_enabled": {},
+        "backup_charge_enabled": {},
     },
     "select": {
         "work_mode": {

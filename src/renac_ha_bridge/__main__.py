@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
-from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode
+from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +145,19 @@ async def run_wallbox_task(ble_addr: str) -> None:
 # Inverter pipeline (one task per device)
 # --------------------------------------------------------------------------- #
 
+def _period_to_mqtt_state(period: Optional[GridChargePeriod]) -> Dict[str, Any]:
+    """Convert a GridChargePeriod to a dict of MQTT-friendly values."""
+    if period is None:
+        return {}
+    return {
+        "enabled": "ON" if period.enabled else "OFF",
+        "start_hour": period.start_hour,
+        "start_minute": period.start_minute,
+        "end_hour": period.end_hour,
+        "end_minute": period.end_minute,
+    }
+
+
 async def run_inverter_task(ble_addr: str) -> None:
     """Loop to keep an inverter connected, publish telemetry and wire actuators."""
     inverter = RenacInverterBLE(ble_addr)
@@ -213,6 +226,201 @@ async def run_inverter_task(ble_addr: str) -> None:
                 current_mode.name.lower() if current_mode is not None else None,
             )
 
+            # ----------------------------------------------------------------- #
+            # Force Time Period 1 callbacks
+            # ----------------------------------------------------------------- #
+            async def _set_force_time_p1_enabled(value: str) -> bool:
+                period = await inverter.get_force_time_period1()
+                if period is None:
+                    period = GridChargePeriod(False, 0, 0, 0, 0)
+                period.enabled = value == "ON"
+                return await inverter.set_force_time_period1(period)
+
+            async def _set_force_time_p1_start_hour(value: int) -> bool:
+                period = await inverter.get_force_time_period1()
+                if period is None:
+                    return False
+                period.start_hour = int(value)
+                return await inverter.set_force_time_period1(period)
+
+            async def _set_force_time_p1_start_minute(value: int) -> bool:
+                period = await inverter.get_force_time_period1()
+                if period is None:
+                    return False
+                period.start_minute = int(value)
+                return await inverter.set_force_time_period1(period)
+
+            async def _set_force_time_p1_end_hour(value: int) -> bool:
+                period = await inverter.get_force_time_period1()
+                if period is None:
+                    return False
+                period.end_hour = int(value)
+                return await inverter.set_force_time_period1(period)
+
+            async def _set_force_time_p1_end_minute(value: int) -> bool:
+                period = await inverter.get_force_time_period1()
+                if period is None:
+                    return False
+                period.end_minute = int(value)
+                return await inverter.set_force_time_period1(period)
+
+            p1 = _period_to_mqtt_state(await inverter.get_force_time_period1())
+            mqtt_dev.set_actuator_callback(
+                "force_time_p1_enabled",
+                wrap_async_callback(loop, _set_force_time_p1_enabled),
+                p1.get("enabled"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p1_start_hour",
+                wrap_async_callback(loop, _set_force_time_p1_start_hour),
+                p1.get("start_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p1_start_minute",
+                wrap_async_callback(loop, _set_force_time_p1_start_minute),
+                p1.get("start_minute"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p1_end_hour",
+                wrap_async_callback(loop, _set_force_time_p1_end_hour),
+                p1.get("end_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p1_end_minute",
+                wrap_async_callback(loop, _set_force_time_p1_end_minute),
+                p1.get("end_minute"),
+            )
+
+            # ----------------------------------------------------------------- #
+            # Force Time Period 2 callbacks
+            # ----------------------------------------------------------------- #
+            async def _set_force_time_p2_enabled(value: str) -> bool:
+                period = await inverter.get_force_time_period2()
+                if period is None:
+                    period = GridChargePeriod(False, 0, 0, 0, 0)
+                period.enabled = value == "ON"
+                return await inverter.set_force_time_period2(period)
+
+            async def _set_force_time_p2_start_hour(value: int) -> bool:
+                period = await inverter.get_force_time_period2()
+                if period is None:
+                    return False
+                period.start_hour = int(value)
+                return await inverter.set_force_time_period2(period)
+
+            async def _set_force_time_p2_start_minute(value: int) -> bool:
+                period = await inverter.get_force_time_period2()
+                if period is None:
+                    return False
+                period.start_minute = int(value)
+                return await inverter.set_force_time_period2(period)
+
+            async def _set_force_time_p2_end_hour(value: int) -> bool:
+                period = await inverter.get_force_time_period2()
+                if period is None:
+                    return False
+                period.end_hour = int(value)
+                return await inverter.set_force_time_period2(period)
+
+            async def _set_force_time_p2_end_minute(value: int) -> bool:
+                period = await inverter.get_force_time_period2()
+                if period is None:
+                    return False
+                period.end_minute = int(value)
+                return await inverter.set_force_time_period2(period)
+
+            p2 = _period_to_mqtt_state(await inverter.get_force_time_period2())
+            mqtt_dev.set_actuator_callback(
+                "force_time_p2_enabled",
+                wrap_async_callback(loop, _set_force_time_p2_enabled),
+                p2.get("enabled"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p2_start_hour",
+                wrap_async_callback(loop, _set_force_time_p2_start_hour),
+                p2.get("start_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p2_start_minute",
+                wrap_async_callback(loop, _set_force_time_p2_start_minute),
+                p2.get("start_minute"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p2_end_hour",
+                wrap_async_callback(loop, _set_force_time_p2_end_hour),
+                p2.get("end_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "force_time_p2_end_minute",
+                wrap_async_callback(loop, _set_force_time_p2_end_minute),
+                p2.get("end_minute"),
+            )
+
+            # ----------------------------------------------------------------- #
+            # Backup Mode Grid Charge callbacks
+            # ----------------------------------------------------------------- #
+            async def _set_backup_charge_enabled(value: str) -> bool:
+                period = await inverter.get_backup_grid_charge()
+                if period is None:
+                    period = GridChargePeriod(False, 0, 0, 0, 0)
+                period.enabled = value == "ON"
+                return await inverter.set_backup_grid_charge(period)
+
+            async def _set_backup_charge_start_hour(value: int) -> bool:
+                period = await inverter.get_backup_grid_charge()
+                if period is None:
+                    return False
+                period.start_hour = int(value)
+                return await inverter.set_backup_grid_charge(period)
+
+            async def _set_backup_charge_start_minute(value: int) -> bool:
+                period = await inverter.get_backup_grid_charge()
+                if period is None:
+                    return False
+                period.start_minute = int(value)
+                return await inverter.set_backup_grid_charge(period)
+
+            async def _set_backup_charge_end_hour(value: int) -> bool:
+                period = await inverter.get_backup_grid_charge()
+                if period is None:
+                    return False
+                period.end_hour = int(value)
+                return await inverter.set_backup_grid_charge(period)
+
+            async def _set_backup_charge_end_minute(value: int) -> bool:
+                period = await inverter.get_backup_grid_charge()
+                if period is None:
+                    return False
+                period.end_minute = int(value)
+                return await inverter.set_backup_grid_charge(period)
+
+            backup = _period_to_mqtt_state(await inverter.get_backup_grid_charge())
+            mqtt_dev.set_actuator_callback(
+                "backup_charge_enabled",
+                wrap_async_callback(loop, _set_backup_charge_enabled),
+                backup.get("enabled"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "backup_charge_start_hour",
+                wrap_async_callback(loop, _set_backup_charge_start_hour),
+                backup.get("start_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "backup_charge_start_minute",
+                wrap_async_callback(loop, _set_backup_charge_start_minute),
+                backup.get("start_minute"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "backup_charge_end_hour",
+                wrap_async_callback(loop, _set_backup_charge_end_hour),
+                backup.get("end_hour"),
+            )
+            mqtt_dev.set_actuator_callback(
+                "backup_charge_end_minute",
+                wrap_async_callback(loop, _set_backup_charge_end_minute),
+                backup.get("end_minute"),
+            )
+
             last_actuator_poll = time.monotonic()
 
             # Poll & publish inverter overview periodically
@@ -252,6 +460,28 @@ async def run_inverter_task(ble_addr: str) -> None:
                         "work_mode",
                         work_mode.name.lower() if work_mode is not None else None,
                     )
+
+                    # Poll grid charge period settings
+                    p1 = _period_to_mqtt_state(await inverter.get_force_time_period1())
+                    mqtt_dev.set_actuator_value("force_time_p1_enabled", p1.get("enabled"))
+                    mqtt_dev.set_actuator_value("force_time_p1_start_hour", p1.get("start_hour"))
+                    mqtt_dev.set_actuator_value("force_time_p1_start_minute", p1.get("start_minute"))
+                    mqtt_dev.set_actuator_value("force_time_p1_end_hour", p1.get("end_hour"))
+                    mqtt_dev.set_actuator_value("force_time_p1_end_minute", p1.get("end_minute"))
+
+                    p2 = _period_to_mqtt_state(await inverter.get_force_time_period2())
+                    mqtt_dev.set_actuator_value("force_time_p2_enabled", p2.get("enabled"))
+                    mqtt_dev.set_actuator_value("force_time_p2_start_hour", p2.get("start_hour"))
+                    mqtt_dev.set_actuator_value("force_time_p2_start_minute", p2.get("start_minute"))
+                    mqtt_dev.set_actuator_value("force_time_p2_end_hour", p2.get("end_hour"))
+                    mqtt_dev.set_actuator_value("force_time_p2_end_minute", p2.get("end_minute"))
+
+                    backup = _period_to_mqtt_state(await inverter.get_backup_grid_charge())
+                    mqtt_dev.set_actuator_value("backup_charge_enabled", backup.get("enabled"))
+                    mqtt_dev.set_actuator_value("backup_charge_start_hour", backup.get("start_hour"))
+                    mqtt_dev.set_actuator_value("backup_charge_start_minute", backup.get("start_minute"))
+                    mqtt_dev.set_actuator_value("backup_charge_end_hour", backup.get("end_hour"))
+                    mqtt_dev.set_actuator_value("backup_charge_end_minute", backup.get("end_minute"))
 
                 if not inverter.is_connected():
                     raise ConnectionError(f"Inverter {ble_addr} disconnected")

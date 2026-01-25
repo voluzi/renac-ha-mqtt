@@ -28,10 +28,15 @@ class SelectConfig(TypedDict, total=False):
     options: List[str]
 
 
+class SwitchConfig(TypedDict, total=False):
+    device_class: str
+
+
 class MqttDeviceEntities(TypedDict, total=False):
     sensor: Dict[str, SensorConfig]
     number: Dict[str, NumberConfig]
     select: Dict[str, SelectConfig]
+    switch: Dict[str, SwitchConfig]
 
 
 class RenacMqttDevice:
@@ -212,6 +217,31 @@ class RenacMqttDevice:
                 },
             }
             config.update(select)
+            self.client.subscribe(f"{base_topic}/set")
+            self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
+
+        for key, switch in self.entities.get("switch", {}).items():
+            base_topic = f"homeassistant/switch/{self.device_id}/{key}"
+            config = {
+                "name": f"{self.device_name} {key.replace('_', ' ').title()}",
+                "state_topic": f"{base_topic}/state",
+                "command_topic": f"{base_topic}/set",
+                "unique_id": f"{self.device_id}_{key}",
+                "availability_topic": f"homeassistant/{self.device_id}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "state_on": "ON",
+                "state_off": "OFF",
+                "device": {
+                    "identifiers": [self.device_id],
+                    "name": self.device_name,
+                    "manufacturer": "RENAC",
+                    "model": self.device_model,
+                },
+            }
+            config.update(switch)
             self.client.subscribe(f"{base_topic}/set")
             self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
 

@@ -3,3 +3,4 @@
 .env
 .envrc
 __pycache__
+*egg-info
