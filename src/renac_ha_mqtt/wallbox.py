@@ -10,6 +10,15 @@ WALLBOX_ENTITIES: MqttDeviceEntities = {
             "step": 1,
             "mode": "box",
         },
+        "allowed_start_hour": {"min": 0, "max": 23, "step": 1, "mode": "box"},
+        "allowed_start_minute": {"min": 0, "max": 59, "step": 1, "mode": "box"},
+        "allowed_end_hour": {"min": 0, "max": 23, "step": 1, "mode": "box"},
+        "allowed_end_minute": {"min": 0, "max": 59, "step": 1, "mode": "box"},
+    },
+    "select": {
+        "charging_mode": {
+            "options": ["app", "rfid", "plug_and_play"],
+        },
     },
     "sensor": {
         "phase_a_voltage": {

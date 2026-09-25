@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
-from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod
+from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod, ChargingMode
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
 
 # --------------------------------------------------------------------------- #
@@ -116,6 +116,60 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
     return _callback
 
 
+def _wallbox_actuator_state(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Convert wallbox basic settings to MQTT actuator values."""
+    if settings is None:
+        return {}
+    start_h, start_m = (int(p) for p in settings["allow_charging_begin"].split(":"))
+    end_h, end_m = (int(p) for p in settings["allow_charging_end"].split(":"))
+    return {
+        "max_output_current": settings["max_output_current"],
+        "charging_mode": ChargingMode(settings["charging_mode"]).name.lower(),
+        "allowed_start_hour": start_h,
+        "allowed_start_minute": start_m,
+        "allowed_end_hour": end_h,
+        "allowed_end_minute": end_m,
+    }
+
+
+async def _wire_wallbox_actuators(dev: RenacWallboxDevice, wallbox: RenacWallboxBLE) -> None:
+    """Register wallbox setters on the MQTT device with their current values."""
+    loop = asyncio.get_running_loop()
+    state = _wallbox_actuator_state(await wallbox.get_basic_settings())
+
+    async def _set_charging_mode(value: str) -> bool:
+        try:
+            mode = ChargingMode[str(value).upper()]
+        except KeyError:
+            return False
+        return await wallbox.set_charging_mode(mode)
+
+    # Each window field is its own entity, so two quick edits must not race
+    # on the same read-modify-write of the whole window.
+    window_lock = asyncio.Lock()
+
+    def _window_setter(field: str) -> Callable[[Any], Awaitable[bool]]:
+        async def _set(value: Any) -> bool:
+            async with window_lock:
+                window = await wallbox.get_allowed_charging_time()
+                if window is None:
+                    return False
+                setattr(window, field, int(value))
+                return await wallbox.set_allowed_charging_time(window)
+        return _set
+
+    setters: Dict[str, Callable[[Any], Awaitable[Optional[bool]]]] = {
+        "max_output_current": wallbox.set_max_output_current,
+        "charging_mode": _set_charging_mode,
+        "allowed_start_hour": _window_setter("start_hour"),
+        "allowed_start_minute": _window_setter("start_minute"),
+        "allowed_end_hour": _window_setter("end_hour"),
+        "allowed_end_minute": _window_setter("end_minute"),
+    }
+    for key, setter in setters.items():
+        dev.set_actuator_callback(key, wrap_async_callback(loop, setter), state.get(key))
+
+
 async def run_wallbox_task(ble_addr: str) -> None:
     """Loop to keep a wallbox connected and forwarding notifications."""
     wallbox = RenacWallboxBLE(ble_addr, on_notification=make_wallbox_callback(ble_addr))
@@ -136,18 +190,13 @@ async def run_wallbox_task(ble_addr: str) -> None:
                 # which carries the serial number.
                 dev = wallbox_mqtt_by_addr.get(ble_addr)
                 if dev is not None and dev is not wired_dev:
-                    dev.set_actuator_callback(
-                        "max_output_current",
-                        wrap_async_callback(asyncio.get_running_loop(), wallbox.set_max_output_current),
-                        await wallbox.get_max_output_current(),
-                    )
+                    await _wire_wallbox_actuators(dev, wallbox)
                     wired_dev = dev
                     last_actuator_poll = time.monotonic()
                 elif dev is not None and time.monotonic() - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
                     last_actuator_poll = time.monotonic()
-                    current = await wallbox.get_max_output_current()
-                    if current is not None:
-                        dev.set_actuator_value("max_output_current", current)
+                    for key, value in _wallbox_actuator_state(await wallbox.get_basic_settings()).items():
+                        dev.set_actuator_value(key, value)
 
                 await asyncio.sleep(POLL_INTERVAL_S)
 
