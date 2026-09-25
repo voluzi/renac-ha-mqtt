@@ -20,6 +20,17 @@ This repository contains two related Python packages:
 
 ---
 
+## ✅ Tested devices
+
+| Device | Type | Connection |
+| --- | --- | --- |
+| RENAC N3-HV-10.0 | Three-phase high-voltage hybrid inverter | BLE |
+| RENAC EV-AC3P-22K | Three-phase 22 kW EV wallbox | BLE |
+
+Other RENAC models may work if they expose BLE with the same Modbus register map; single-phase and low-voltage models (e.g. the N1 series) are untested. Reports for other devices are welcome in the issues.
+
+---
+
 ## 📦 Installation
 
 ```bash
