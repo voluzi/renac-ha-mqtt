@@ -30,6 +30,8 @@ INVERTER_ADDRS = os.getenv("RENAC_INVERTER_ADDRS", "")
 WALLBOX_ADDRS = os.getenv("RENAC_WALLBOX_ADDRS", "")
 
 POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
+# Wallbox status is read on demand this often, on top of its own pushes
+WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "10"))
 # Separate interval for refreshing actuator states
 ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
 
@@ -182,7 +184,8 @@ async def _wire_wallbox_actuators(dev: RenacWallboxDevice, wallbox: RenacWallbox
 
 async def run_wallbox_task(ble_addr: str) -> None:
     """Loop to keep a wallbox connected and forwarding notifications."""
-    wallbox = RenacWallboxBLE(ble_addr, on_notification=make_wallbox_callback(ble_addr))
+    publish_status = make_wallbox_callback(ble_addr)
+    wallbox = RenacWallboxBLE(ble_addr, on_notification=publish_status)
     wired_dev: Optional[RenacWallboxDevice] = None
 
     while not shutdown_event.is_set():
@@ -190,14 +193,22 @@ async def run_wallbox_task(ble_addr: str) -> None:
             await wallbox.connect()
             logging.info("⚡️ Connected to wallbox %s", ble_addr)
             last_actuator_poll = 0.0
+            last_status_poll = 0.0
 
-            # Telemetry flows via notifications; settings are polled.
+            # The wallbox pushes its status only about once a minute, so it is
+            # also polled; settings are polled on the actuator interval.
             while not shutdown_event.is_set():
                 if not wallbox.is_connected():
                     raise ConnectionError(f"Wallbox {ble_addr} disconnected")
 
-                # The MQTT device only exists after the first status push,
-                # which carries the serial number.
+                if time.monotonic() - last_status_poll >= WALLBOX_STATUS_INTERVAL_S:
+                    last_status_poll = time.monotonic()
+                    status = await wallbox.get_status()
+                    if status is not None:
+                        publish_status(status)
+
+                # The MQTT device is created from the first status, which
+                # carries the serial number.
                 dev = wallbox_mqtt_by_addr.get(ble_addr)
                 if dev is not None and dev is not wired_dev:
                     await _wire_wallbox_actuators(dev, wallbox)
