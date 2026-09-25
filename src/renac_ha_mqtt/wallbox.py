@@ -2,6 +2,15 @@ from renac_ha_mqtt.mqtt_device import RenacMqttDevice, MqttDeviceEntities
 from typing import Optional
 
 WALLBOX_ENTITIES: MqttDeviceEntities = {
+    "number": {
+        "max_output_current": {
+            "unit_of_measurement": "A",
+            "min": 6,
+            "max": 32,
+            "step": 1,
+            "mode": "box",
+        },
+    },
     "sensor": {
         "phase_a_voltage": {
             "unit_of_measurement": "V",

@@ -119,16 +119,36 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
 async def run_wallbox_task(ble_addr: str) -> None:
     """Loop to keep a wallbox connected and forwarding notifications."""
     wallbox = RenacWallboxBLE(ble_addr, on_notification=make_wallbox_callback(ble_addr))
+    wired_dev: Optional[RenacWallboxDevice] = None
 
     while not shutdown_event.is_set():
         try:
             await wallbox.connect()
             logging.info("⚡️ Connected to wallbox %s", ble_addr)
+            last_actuator_poll = 0.0
 
-            # Keep connection alive; all data flows via notifications
+            # Telemetry flows via notifications; settings are polled.
             while not shutdown_event.is_set():
                 if not wallbox.is_connected():
                     raise ConnectionError(f"Wallbox {ble_addr} disconnected")
+
+                # The MQTT device only exists after the first status push,
+                # which carries the serial number.
+                dev = wallbox_mqtt_by_addr.get(ble_addr)
+                if dev is not None and dev is not wired_dev:
+                    dev.set_actuator_callback(
+                        "max_output_current",
+                        wrap_async_callback(asyncio.get_running_loop(), wallbox.set_max_output_current),
+                        await wallbox.get_max_output_current(),
+                    )
+                    wired_dev = dev
+                    last_actuator_poll = time.monotonic()
+                elif dev is not None and time.monotonic() - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
+                    last_actuator_poll = time.monotonic()
+                    current = await wallbox.get_max_output_current()
+                    if current is not None:
+                        dev.set_actuator_value("max_output_current", current)
+
                 await asyncio.sleep(POLL_INTERVAL_S)
 
         except Exception:
