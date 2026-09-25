@@ -153,7 +153,7 @@ wheels = [
 [[package]]
 name = "renac-ble"
 version = "0.1.0"
-source = { git = "https://github.com/voluzi/renac-ble.git?rev=main#5ae02ced01200c1301c22e061c0783c01f579bbc" }
+source = { git = "https://github.com/voluzi/renac-ble.git?rev=main#7abe6a9e7d1f4b30aeb3036029e099c53591a006" }
 dependencies = [
     { name = "bleak" },
 ]

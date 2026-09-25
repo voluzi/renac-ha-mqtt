@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
-from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod
+from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod, ChargingMode
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
 
 # --------------------------------------------------------------------------- #
@@ -30,6 +30,8 @@ INVERTER_ADDRS = os.getenv("RENAC_INVERTER_ADDRS", "")
 WALLBOX_ADDRS = os.getenv("RENAC_WALLBOX_ADDRS", "")
 
 POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
+# Wallbox status is read on demand this often, on top of its own pushes
+WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "10"))
 # Separate interval for refreshing actuator states
 ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
 
@@ -113,22 +115,110 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
             logging.info("🔌 MQTT device created for wallbox %s (sn=%s model=%s)",
                          ble_addr, parsed.get("sn"), parsed.get("model"))
         dev.set_sensor_value({k: v for k, v in parsed.items() if k not in WALLBOX_EXCLUDED_KEYS})
+        if parsed.get("state"):
+            dev.set_actuator_value("charging", "ON" if parsed["state"] == "charging" else "OFF")
     return _callback
+
+
+def _wallbox_actuator_state(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Convert wallbox basic settings to MQTT actuator values."""
+    if settings is None:
+        return {}
+    start_h, start_m = (int(p) for p in settings["allow_charging_begin"].split(":"))
+    end_h, end_m = (int(p) for p in settings["allow_charging_end"].split(":"))
+    return {
+        "max_output_current": settings["max_output_current"],
+        "charging_mode": ChargingMode(settings["charging_mode"]).name.lower(),
+        "allowed_start_hour": start_h,
+        "allowed_start_minute": start_m,
+        "allowed_end_hour": end_h,
+        "allowed_end_minute": end_m,
+    }
+
+
+async def _wire_wallbox_actuators(dev: RenacWallboxDevice, wallbox: RenacWallboxBLE) -> None:
+    """Register wallbox setters on the MQTT device with their current values."""
+    loop = asyncio.get_running_loop()
+    state = _wallbox_actuator_state(await wallbox.get_basic_settings())
+
+    async def _set_charging_mode(value: str) -> bool:
+        try:
+            mode = ChargingMode[str(value).upper()]
+        except KeyError:
+            return False
+        return await wallbox.set_charging_mode(mode)
+
+    # Each window field is its own entity, so two quick edits must not race
+    # on the same read-modify-write of the whole window.
+    window_lock = asyncio.Lock()
+
+    def _window_setter(field: str) -> Callable[[Any], Awaitable[bool]]:
+        async def _set(value: Any) -> bool:
+            async with window_lock:
+                window = await wallbox.get_allowed_charging_time()
+                if window is None:
+                    return False
+                setattr(window, field, int(value))
+                return await wallbox.set_allowed_charging_time(window)
+        return _set
+
+    async def _set_charging(value: str) -> bool:
+        if value == "ON":
+            return await wallbox.start_charging()
+        if value == "OFF":
+            return await wallbox.stop_charging()
+        return False
+
+    setters: Dict[str, Callable[[Any], Awaitable[Optional[bool]]]] = {
+        "charging": _set_charging,
+        "max_output_current": wallbox.set_max_output_current,
+        "charging_mode": _set_charging_mode,
+        "allowed_start_hour": _window_setter("start_hour"),
+        "allowed_start_minute": _window_setter("start_minute"),
+        "allowed_end_hour": _window_setter("end_hour"),
+        "allowed_end_minute": _window_setter("end_minute"),
+    }
+    for key, setter in setters.items():
+        dev.set_actuator_callback(key, wrap_async_callback(loop, setter), state.get(key))
 
 
 async def run_wallbox_task(ble_addr: str) -> None:
     """Loop to keep a wallbox connected and forwarding notifications."""
-    wallbox = RenacWallboxBLE(ble_addr, on_notification=make_wallbox_callback(ble_addr))
+    publish_status = make_wallbox_callback(ble_addr)
+    wallbox = RenacWallboxBLE(ble_addr, on_notification=publish_status)
+    wired_dev: Optional[RenacWallboxDevice] = None
 
     while not shutdown_event.is_set():
         try:
             await wallbox.connect()
             logging.info("⚡️ Connected to wallbox %s", ble_addr)
+            last_actuator_poll = 0.0
+            last_status_poll = 0.0
 
-            # Keep connection alive; all data flows via notifications
+            # The wallbox pushes its status only about once a minute, so it is
+            # also polled; settings are polled on the actuator interval.
             while not shutdown_event.is_set():
                 if not wallbox.is_connected():
                     raise ConnectionError(f"Wallbox {ble_addr} disconnected")
+
+                if time.monotonic() - last_status_poll >= WALLBOX_STATUS_INTERVAL_S:
+                    last_status_poll = time.monotonic()
+                    status = await wallbox.get_status()
+                    if status is not None:
+                        publish_status(status)
+
+                # The MQTT device is created from the first status, which
+                # carries the serial number.
+                dev = wallbox_mqtt_by_addr.get(ble_addr)
+                if dev is not None and dev is not wired_dev:
+                    await _wire_wallbox_actuators(dev, wallbox)
+                    wired_dev = dev
+                    last_actuator_poll = time.monotonic()
+                elif dev is not None and time.monotonic() - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
+                    last_actuator_poll = time.monotonic()
+                    for key, value in _wallbox_actuator_state(await wallbox.get_basic_settings()).items():
+                        dev.set_actuator_value(key, value)
+
                 await asyncio.sleep(POLL_INTERVAL_S)
 
         except Exception:

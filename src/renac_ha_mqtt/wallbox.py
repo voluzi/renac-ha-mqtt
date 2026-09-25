@@ -2,6 +2,27 @@ from renac_ha_mqtt.mqtt_device import RenacMqttDevice, MqttDeviceEntities
 from typing import Optional
 
 WALLBOX_ENTITIES: MqttDeviceEntities = {
+    "number": {
+        "max_output_current": {
+            "unit_of_measurement": "A",
+            "min": 6,
+            "max": 32,
+            "step": 1,
+            "mode": "box",
+        },
+        "allowed_start_hour": {"min": 0, "max": 23, "step": 1, "mode": "box"},
+        "allowed_start_minute": {"min": 0, "max": 59, "step": 1, "mode": "box"},
+        "allowed_end_hour": {"min": 0, "max": 23, "step": 1, "mode": "box"},
+        "allowed_end_minute": {"min": 0, "max": 59, "step": 1, "mode": "box"},
+    },
+    "switch": {
+        "charging": {},
+    },
+    "select": {
+        "charging_mode": {
+            "options": ["app", "rfid", "plug_and_play"],
+        },
+    },
     "sensor": {
         "phase_a_voltage": {
             "unit_of_measurement": "V",
