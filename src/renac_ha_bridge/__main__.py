@@ -113,6 +113,8 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
             logging.info("🔌 MQTT device created for wallbox %s (sn=%s model=%s)",
                          ble_addr, parsed.get("sn"), parsed.get("model"))
         dev.set_sensor_value({k: v for k, v in parsed.items() if k not in WALLBOX_EXCLUDED_KEYS})
+        if parsed.get("state"):
+            dev.set_actuator_value("charging", "ON" if parsed["state"] == "charging" else "OFF")
     return _callback
 
 
@@ -158,7 +160,15 @@ async def _wire_wallbox_actuators(dev: RenacWallboxDevice, wallbox: RenacWallbox
                 return await wallbox.set_allowed_charging_time(window)
         return _set
 
+    async def _set_charging(value: str) -> bool:
+        if value == "ON":
+            return await wallbox.start_charging()
+        if value == "OFF":
+            return await wallbox.stop_charging()
+        return False
+
     setters: Dict[str, Callable[[Any], Awaitable[Optional[bool]]]] = {
+        "charging": _set_charging,
         "max_output_current": wallbox.set_max_output_current,
         "charging_mode": _set_charging_mode,
         "allowed_start_hour": _window_setter("start_hour"),
