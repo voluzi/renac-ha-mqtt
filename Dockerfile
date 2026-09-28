@@ -19,7 +19,7 @@ COPY pyproject.toml README.md LICENSE /app/
 COPY src /app/src
 
 RUN pip install --upgrade pip && \
-    pip install "."
+    pip install "." "bleak==2.1.1" "dbus-fast==3.1.2"
 
 ENV MQTT_HOST=127.0.0.1 \
     MQTT_PORT=1883 \
