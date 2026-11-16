@@ -34,6 +34,7 @@ POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
 WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "10"))
 # Separate interval for refreshing actuator states
 ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
+BLE_WRITE_TIMEOUT_S = 30.0
 
 shutdown_event = asyncio.Event()
 
@@ -80,13 +81,17 @@ def _resolve_wallbox_addrs() -> list[str]:
 def wrap_async_callback(loop: asyncio.AbstractEventLoop,
                         coro_func: Callable[[Any], Awaitable[Optional[bool]]]
                         ) -> Callable[[Any], Optional[bool]]:
-    """Wrap an async setter so it can be called by sync actuator callbacks."""
+    """Run an async setter with a timeout from the MQTT command worker."""
     def wrapper(value: Any) -> Optional[bool]:
-        fut = asyncio.run_coroutine_threadsafe(coro_func(value), loop)
+        async def execute() -> Optional[bool]:
+            return await asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S)
+
+        fut = asyncio.run_coroutine_threadsafe(execute(), loop)
         try:
             return fut.result()
-        except Exception as exc:  # pragma: no cover - best-effort logging
-            logging.error("Error executing %s: %s", getattr(coro_func, "__name__", coro_func), exc)
+        except Exception as exc:
+            logging.warning("Error executing %s: %s",
+                            getattr(coro_func, "__name__", coro_func), exc or type(exc).__name__)
             return False
     return wrapper
 
@@ -251,25 +256,26 @@ def _period_to_mqtt_state(period: Optional[GridChargePeriod]) -> Dict[str, Any]:
 async def run_inverter_task(ble_addr: str) -> None:
     """Loop to keep an inverter connected, publish telemetry and wire actuators."""
     inverter = RenacInverterBLE(ble_addr)
-    mqtt_dev: Optional[RenacInverterDevice] = None
 
     while not shutdown_event.is_set():
         try:
             await inverter.connect()
             logging.info("⚡️ Connected to inverter %s", ble_addr)
 
-            info = await inverter.get_info()
-            mqtt_dev = RenacInverterDevice(
-                device_name=f"RENAC Inverter",
-                serial_number=info.get("sn"),
-                model=info.get("model"),
-                mqtt_host=MQTT_HOST,
-                mqtt_port=MQTT_PORT,
-                mqtt_user=MQTT_USER,
-                mqtt_password=MQTT_PASSWORD,
-            )
-            mqtt_dev.connect()
-            inverter_mqtt_by_addr[ble_addr] = mqtt_dev
+            mqtt_dev = inverter_mqtt_by_addr.get(ble_addr)
+            if mqtt_dev is None:
+                info = await inverter.get_info()
+                mqtt_dev = RenacInverterDevice(
+                    device_name="RENAC Inverter",
+                    serial_number=info.get("sn"),
+                    model=info.get("model"),
+                    mqtt_host=MQTT_HOST,
+                    mqtt_port=MQTT_PORT,
+                    mqtt_user=MQTT_USER,
+                    mqtt_password=MQTT_PASSWORD,
+                )
+                mqtt_dev.connect()
+                inverter_mqtt_by_addr[ble_addr] = mqtt_dev
 
             loop = asyncio.get_running_loop()
             mqtt_dev.set_actuator_callback(
@@ -615,6 +621,8 @@ async def _run_all(inverter_addrs: Iterable[str], wallbox_addrs: Iterable[str]) 
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        devices = [*inverter_mqtt_by_addr.values(), *wallbox_mqtt_by_addr.values()]
+        await asyncio.gather(*(asyncio.to_thread(dev.disconnect) for dev in devices))
 
 
 def main() -> None:
