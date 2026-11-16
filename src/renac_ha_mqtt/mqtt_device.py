@@ -2,12 +2,17 @@
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import os
+import socket
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 import paho.mqtt.client as mqtt
 from typing import Any, Callable, TypedDict, Optional, Dict, Union, List
 
 ActuatorPayload = Union[int, float, str, bool, Dict[str, Any], List[Any]]
-ActuatorCallback = Callable[[ActuatorPayload], Optional[bool]]
+ActuatorCallback = Callable[[ActuatorPayload], Union[Optional[bool], Future[Optional[bool]]]]
+COMMAND_DRAIN_TIMEOUT_S = 2.0
+OFFLINE_PUBLISH_TIMEOUT_S = 2.0
 
 
 class SensorConfig(TypedDict, total=False):
@@ -50,7 +55,8 @@ class RenacMqttDevice:
                  mqtt_host: str,
                  mqtt_port: int = 1883,
                  mqtt_user: Optional[str] = None,
-                 mqtt_password: Optional[str] = None):
+                 mqtt_password: Optional[str] = None,
+                 client_identifier: Optional[str] = None):
         self.device_id = device_id
         self.device_name = device_name
         self.device_model = device_model
@@ -62,12 +68,18 @@ class RenacMqttDevice:
         self.state = {}
         self._actuator_callbacks: Dict[str, ActuatorCallback] = {}
         self._command_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"renac-{device_id}")
+        self._command_lock = threading.Lock()
+        self._commands: set[Future] = set()
+        self._active_write: Optional[Future] = None
+        self._stopping = False
+        self._cancel_commands = False
 
         self.logger = logging.getLogger(f"renac.{device_id}")
 
         self.client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f"renac_{device_id}",
+            client_id=f"renac_{client_identifier or device_id}_"
+                      f"{os.getenv('MQTT_CLIENT_ID_PREFIX') or socket.gethostname()}_{os.getpid()}",
         )
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
         if self.mqtt_user:
@@ -82,15 +94,36 @@ class RenacMqttDevice:
     def connect(self) -> None:
         """Connect to the configured MQTT broker and start the network loop."""
         self.logger.info("🚀 Connecting to MQTT broker...")
-        self.client.connect(self.mqtt_host, self.mqtt_port, 60)
+        self.client.connect_async(self.mqtt_host, self.mqtt_port, 60)
         self.client.loop_start()
         self.logger.info("📡 MQTT loop started")
 
     def disconnect(self) -> None:
-        """Stop MQTT and drain the active command, discarding queued commands."""
-        self.client.disconnect()
-        self.client.loop_stop()
-        self._command_worker.shutdown(wait=True, cancel_futures=True)
+        """Drain commands briefly and flush offline availability before closing MQTT."""
+        with self._command_lock:
+            self._stopping = True
+            commands = list(self._commands)
+        self._command_worker.shutdown(wait=False, cancel_futures=True)
+        pending = [command for command in commands if not command.done()]
+        if pending and wait(pending, timeout=COMMAND_DRAIN_TIMEOUT_S).not_done:
+            with self._command_lock:
+                self._cancel_commands = True
+                if self._active_write is not None:
+                    self._active_write.cancel()
+            self.logger.warning("Timed out draining MQTT commands")
+        try:
+            published = self.client.publish(
+                f"homeassistant/{self.device_id}/availability", "offline", qos=1, retain=True,
+            )
+            published.wait_for_publish(timeout=OFFLINE_PUBLISH_TIMEOUT_S)
+            if not published.is_published():
+                self.logger.warning("Timed out publishing offline availability")
+        except (RuntimeError, ValueError) as exc:
+            self.logger.warning("Could not publish offline availability: %s", exc)
+        finally:
+            self.client.disconnect()
+            self.client.loop_stop()
+            self._connected = False
 
     def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
         """Publish ``payload`` on ``topic``.
@@ -102,6 +135,8 @@ class RenacMqttDevice:
         self.client.publish(topic, payload, retain=retain)
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
+        if self._stopping:
+            return
         if reason_code == 0:
             self.logger.info("✅ MQTT connected")
             self._connected = True
@@ -129,24 +164,46 @@ class RenacMqttDevice:
 
                 callback = self._actuator_callbacks[key]
                 self.logger.info(f"🔧 Received command for {key}: {value}")
-                self._command_worker.submit(self._execute_command, key, value, callback)
+                with self._command_lock:
+                    if self._stopping:
+                        return
+                    command = self._command_worker.submit(self._execute_command, key, value, callback)
+                    self._commands.add(command)
+                command.add_done_callback(self._command_finished)
             else:
                 self.logger.warning(f"⚠️ No callback found for actuator key: {key}")
         else:
             self.logger.debug(f"📩 Unhandled MQTT message: {msg.topic} => {msg.payload}")
 
+    def _command_finished(self, command: Future) -> None:
+        with self._command_lock:
+            self._commands.discard(command)
+
     def _execute_command(self, key: str, value: ActuatorPayload, callback: ActuatorCallback) -> None:
         try:
+            with self._command_lock:
+                if self._stopping:
+                    return
             result = callback(value)
-            if result is False:
-                self.logger.warning(f"⚠️ Command for {key} failed or was rejected")
-                return
-            self.logger.info(f"✅ Command for {key} executed")
-            self._set_state(key, value)
-            topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
-            self.client.publish(topic, value, retain=True)
+            if isinstance(result, Future):
+                with self._command_lock:
+                    self._active_write = result
+                    if self._cancel_commands:
+                        result.cancel()
+                result = result.result()
+            with self._command_lock:
+                if result is False or self._cancel_commands:
+                    self.logger.warning(f"⚠️ Command for {key} failed or was rejected")
+                    return
+                self.logger.info(f"✅ Command for {key} executed")
+                self._set_state(key, value)
+                topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
+                self.client.publish(topic, value, retain=True)
         except Exception as exc:
-            self.logger.warning("⚠️ Error executing callback for %s: %s", key, exc)
+            self.logger.warning("⚠️ Error executing callback for %s: %s", key, str(exc) or type(exc).__name__)
+        finally:
+            with self._command_lock:
+                self._active_write = None
 
     def _register_sensors(self):
         for key, sensor in self.entities.get("sensor", {}).items():

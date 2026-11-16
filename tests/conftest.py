@@ -34,6 +34,7 @@ def device(mqtt_clients):
 def bridge_devices(monkeypatch, mqtt_clients):
     monkeypatch.setattr(bridge, "inverter_mqtt_by_addr", {})
     monkeypatch.setattr(bridge, "wallbox_mqtt_by_addr", {})
+    monkeypatch.setattr(bridge, "BLE_RECONNECT_DELAY_S", 0, raising=False)
     yield
     for dev in [*bridge.inverter_mqtt_by_addr.values(), *bridge.wallbox_mqtt_by_addr.values()]:
         dev.disconnect()

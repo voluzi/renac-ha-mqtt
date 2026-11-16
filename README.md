@@ -88,6 +88,8 @@ renac-ble-ha-bridge
 
 This will connect to both the inverter and the wallbox via BLE and publish their telemetry/control entities into Home Assistant.
 
+MQTT client IDs include the device serial number (or BLE address when missing), hostname, and process ID. Set `MQTT_CLIENT_ID_PREFIX` to override the hostname portion for a bridge instance; Home Assistant topics and entity IDs are independent of this setting.
+
 ---
 
 ## 📚 Related

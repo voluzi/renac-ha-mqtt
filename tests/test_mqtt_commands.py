@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import call
 
 import pytest
-from paho.mqtt.client import CallbackAPIVersion
 
 from renac_ha_bridge import __main__ as bridge
+from renac_ha_mqtt import mqtt_device
 
 
 def message(key="min_soc_on_grid", value=100):
@@ -34,7 +34,14 @@ def test_messages_return_before_writes_finish_and_preserve_order(device):
         callback = bridge.wrap_async_callback(asyncio.get_running_loop(), setter)
         device.set_actuator_callback("min_soc", callback)
         device.set_actuator_callback("min_soc_on_grid", callback)
-        device.client.publish.side_effect = lambda *a, **kw: published.set() if a[1] == 20 else None
+        publish_info = device.client.publish.return_value
+
+        def publish(*args, **kwargs):
+            if args[1] == 20:
+                published.set()
+            return publish_info
+
+        device.client.publish.side_effect = publish
         returned = threading.Event()
 
         def receive():
@@ -65,7 +72,10 @@ def test_messages_return_before_writes_finish_and_preserve_order(device):
 @pytest.mark.parametrize("failure", [False, RuntimeError("BLE write failed")])
 def test_failed_write_does_not_change_or_publish_state(device, failure, caplog):
     async def scenario():
+        attempted = threading.Event()
+
         def setter(value):
+            attempted.set()
             if isinstance(failure, Exception):
                 raise failure
             return failure
@@ -73,15 +83,16 @@ def test_failed_write_does_not_change_or_publish_state(device, failure, caplog):
         device.set_actuator_callback("min_soc_on_grid", setter, 50)
         device.client.publish.reset_mock()
         await asyncio.to_thread(device.on_message, None, None, message())
+        assert await asyncio.to_thread(attempted.wait, 2)
         await asyncio.to_thread(device.disconnect)
         assert device.state["min_soc_on_grid"] == 50
-        device.client.publish.assert_not_called()
+        assert not any(c.args[0].endswith("/state") for c in device.client.publish.call_args_list)
         assert any(record.levelname == "WARNING" for record in caplog.records)
 
     asyncio.run(scenario())
 
 
-def test_timed_out_write_is_cancelled_before_next_command(device, monkeypatch):
+def test_timed_out_write_is_cancelled_before_next_command(device, monkeypatch, caplog):
     monkeypatch.setattr(bridge, "BLE_WRITE_TIMEOUT_S", 0.05)
 
     async def scenario():
@@ -101,7 +112,13 @@ def test_timed_out_write_is_cancelled_before_next_command(device, monkeypatch):
             "min_soc_on_grid", bridge.wrap_async_callback(asyncio.get_running_loop(), setter), 50,
         )
         device.client.publish.reset_mock()
-        device.client.publish.side_effect = lambda *a, **kw: published.set()
+        publish_info = device.client.publish.return_value
+
+        def publish(*args, **kwargs):
+            published.set()
+            return publish_info
+
+        device.client.publish.side_effect = publish
         await asyncio.wait_for(asyncio.to_thread(device.on_message, None, None, message()), 1)
         await asyncio.wait_for(asyncio.to_thread(device.on_message, None, None, message(value=80)), 1)
         assert await asyncio.to_thread(published.wait, 1), "Timed-out write blocked the queue"
@@ -110,16 +127,12 @@ def test_timed_out_write_is_cancelled_before_next_command(device, monkeypatch):
         device.client.publish.assert_called_once_with(
             "homeassistant/number/inverter_test/min_soc_on_grid/state", 80, retain=True,
         )
+        assert "TimeoutError" in caplog.text
 
     asyncio.run(scenario())
 
 
-def test_broker_reconnect_restores_availability_and_subscriptions(device, mqtt_clients):
-    factory, _ = mqtt_clients
-    assert factory.call_args.kwargs == {
-        "callback_api_version": CallbackAPIVersion.VERSION2,
-        "client_id": "renac_inverter_test",
-    }
+def test_broker_reconnect_restores_availability_and_subscriptions(device):
     device.client.reconnect_delay_set.assert_called_once_with(min_delay=1, max_delay=60)
     device.on_connect(device.client, None, {}, 0, None)
     assert device._connected
@@ -164,5 +177,83 @@ def test_bridge_shutdown_drains_active_command_without_blocking_asyncio(device, 
         device.client.disconnect.assert_called_once()
         device.client.loop_stop.assert_called_once()
         assert device.state["min_soc_on_grid"] == 100
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_flushes_retained_offline_before_closing(device):
+    device.disconnect()
+    device.on_connect(device.client, None, {}, 0, None)
+    calls = device.client.mock_calls
+    offline = call.publish("homeassistant/inverter_test/availability", "offline", qos=1, retain=True)
+    assert offline in calls
+    assert device.client.publish.call_count == 1
+    wait_call = next(c for c in calls if c[0] == "publish().wait_for_publish")
+    assert 0 < wait_call.kwargs["timeout"] <= 5
+    assert calls.index(offline) < calls.index(wait_call) < calls.index(call.disconnect())
+
+
+def test_disconnect_still_closes_when_offline_publish_fails(device):
+    device.client.publish.return_value.wait_for_publish.side_effect = RuntimeError("Broker offline")
+    device.disconnect()
+    device.client.disconnect.assert_called_once()
+    device.client.loop_stop.assert_called_once()
+
+
+def test_shutdown_cancels_hung_write_before_stopping_ble(device, monkeypatch):
+    monkeypatch.setattr(mqtt_device, "COMMAND_DRAIN_TIMEOUT_S", 0.02)
+
+    async def scenario():
+        ble_started = asyncio.Event()
+        write_started = asyncio.Event()
+        write_cancelled = asyncio.Event()
+        order = []
+        writes = []
+
+        async def setter(value):
+            writes.append(value)
+            write_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                write_cancelled.set()
+
+        async def inverter_task(addr):
+            ble_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append("ble_stopped")
+
+        def fail_cleanup():
+            raise RuntimeError("Cleanup failed")
+
+        failed_device = SimpleNamespace(disconnect=fail_cleanup)
+        monkeypatch.setattr(bridge, "shutdown_event", asyncio.Event())
+        monkeypatch.setattr(bridge, "inverter_mqtt_by_addr", {"test": device})
+        monkeypatch.setattr(bridge, "wallbox_mqtt_by_addr", {"failed": failed_device})
+        monkeypatch.setattr(bridge, "run_inverter_task", inverter_task)
+        device.client.disconnect.side_effect = lambda: order.append("mqtt_stopped")
+        device.set_actuator_callback(
+            "min_soc_on_grid", bridge.wrap_async_callback(asyncio.get_running_loop(), setter),
+        )
+        task = asyncio.create_task(bridge._run_all(["test"], []))
+        try:
+            await asyncio.wait_for(ble_started.wait(), 1)
+            await asyncio.to_thread(device.on_message, None, None, message())
+            await asyncio.wait_for(write_started.wait(), 1)
+            await asyncio.to_thread(device.on_message, None, None, message(value=80))
+            bridge.shutdown_event.set()
+            await asyncio.wait_for(task, 1)
+            await asyncio.wait_for(write_cancelled.wait(), 1)
+            assert order == ["mqtt_stopped", "ble_stopped"]
+            assert writes == [100]
+            assert "min_soc_on_grid" not in device.state
+            device.client.publish.assert_called_once_with(
+                "homeassistant/inverter_test/availability", "offline", qos=1, retain=True,
+            )
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())

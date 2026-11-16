@@ -5,6 +5,7 @@ import os
 import signal
 import logging
 import time
+from concurrent.futures import Future
 from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
 from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod, ChargingMode
@@ -35,6 +36,7 @@ WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "
 # Separate interval for refreshing actuator states
 ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
 BLE_WRITE_TIMEOUT_S = 30.0
+BLE_RECONNECT_DELAY_S = 5.0
 
 shutdown_event = asyncio.Event()
 
@@ -80,19 +82,18 @@ def _resolve_wallbox_addrs() -> list[str]:
 
 def wrap_async_callback(loop: asyncio.AbstractEventLoop,
                         coro_func: Callable[[Any], Awaitable[Optional[bool]]]
-                        ) -> Callable[[Any], Optional[bool]]:
-    """Run an async setter with a timeout from the MQTT command worker."""
-    def wrapper(value: Any) -> Optional[bool]:
+                        ) -> Callable[[Any], Future[Optional[bool]]]:
+    """Schedule a cancellable async setter with a BLE write timeout."""
+    def wrapper(value: Any) -> Future[Optional[bool]]:
         async def execute() -> Optional[bool]:
-            return await asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S)
+            try:
+                return await asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S)
+            except Exception as exc:
+                logging.warning("Error executing %s: %s",
+                                getattr(coro_func, "__name__", coro_func), str(exc) or type(exc).__name__)
+                return False
 
-        fut = asyncio.run_coroutine_threadsafe(execute(), loop)
-        try:
-            return fut.result()
-        except Exception as exc:
-            logging.warning("Error executing %s: %s",
-                            getattr(coro_func, "__name__", coro_func), exc or type(exc).__name__)
-            return False
+        return asyncio.run_coroutine_threadsafe(execute(), loop)
     return wrapper
 
 
@@ -105,10 +106,13 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
     def _callback(parsed: Dict[str, Any]) -> None:
         dev = wallbox_mqtt_by_addr.get(ble_addr)
         if dev is None:
+            if shutdown_event.is_set():
+                return
             # Build device on first telemetry (we need serial/model)
             dev = RenacWallboxDevice(
                 device_name=f"RENAC Wallbox",
                 serial_number=parsed.get("sn"),
+                ble_address=ble_addr,
                 model=parsed.get("model"),
                 mqtt_host=MQTT_HOST,
                 mqtt_port=MQTT_PORT,
@@ -202,7 +206,9 @@ async def run_wallbox_task(ble_addr: str) -> None:
 
             # The wallbox pushes its status only about once a minute, so it is
             # also polled; settings are polled on the actuator interval.
-            while not shutdown_event.is_set():
+            while True:
+                if shutdown_event.is_set():
+                    await asyncio.Future()
                 if not wallbox.is_connected():
                     raise ConnectionError(f"Wallbox {ble_addr} disconnected")
 
@@ -227,8 +233,8 @@ async def run_wallbox_task(ble_addr: str) -> None:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
         except Exception:
-            logging.exception("Wallbox loop error (%s). Reconnecting in 5s...", ble_addr)
-            await asyncio.sleep(5)
+            logging.exception("Wallbox loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
+            await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         finally:
             try:
                 await wallbox.disconnect()
@@ -265,9 +271,12 @@ async def run_inverter_task(ble_addr: str) -> None:
             mqtt_dev = inverter_mqtt_by_addr.get(ble_addr)
             if mqtt_dev is None:
                 info = await inverter.get_info()
+                if shutdown_event.is_set():
+                    return
                 mqtt_dev = RenacInverterDevice(
                     device_name="RENAC Inverter",
                     serial_number=info.get("sn"),
+                    ble_address=ble_addr,
                     model=info.get("model"),
                     mqtt_host=MQTT_HOST,
                     mqtt_port=MQTT_PORT,
@@ -520,7 +529,9 @@ async def run_inverter_task(ble_addr: str) -> None:
             last_actuator_poll = time.monotonic()
 
             # Poll & publish inverter overview periodically
-            while not shutdown_event.is_set():
+            while True:
+                if shutdown_event.is_set():
+                    await asyncio.Future()
                 overview = await inverter.get_power_and_energy_overview()
                 mqtt_dev.set_sensor_value(overview)
 
@@ -584,8 +595,8 @@ async def run_inverter_task(ble_addr: str) -> None:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
         except Exception:
-            logging.exception("Inverter loop error (%s). Reconnecting in 5s...", ble_addr)
-            await asyncio.sleep(5)
+            logging.exception("Inverter loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
+            await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         finally:
             try:
                 await inverter.disconnect()
@@ -614,15 +625,14 @@ async def _run_all(inverter_addrs: Iterable[str], wallbox_addrs: Iterable[str]) 
             "No devices configured. Set RENAC_INVERTER_ADDR(S) and/or RENAC_WALLBOX_ADDR(S)."
         )
 
-    # Wait until shutdown, then cancel all tasks
     try:
         await shutdown_event.wait()
     finally:
+        devices = [*inverter_mqtt_by_addr.values(), *wallbox_mqtt_by_addr.values()]
+        await asyncio.gather(*(asyncio.to_thread(dev.disconnect) for dev in devices), return_exceptions=True)
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        devices = [*inverter_mqtt_by_addr.values(), *wallbox_mqtt_by_addr.values()]
-        await asyncio.gather(*(asyncio.to_thread(dev.disconnect) for dev in devices))
 
 
 def main() -> None:
