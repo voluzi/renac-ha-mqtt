@@ -143,6 +143,11 @@ class RenacMqttDevice:
             self.client.publish(f"homeassistant/{self.device_id}/availability", "online", retain=True)
             self._register_sensors()
             self._register_actuators()
+            with self._command_lock:
+                for key, value in self.state.copy().items():
+                    entity_type = self.get_entity_type(key) or "sensor"
+                    topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
+                    self.publish(topic, value, retain=True)
         else:
             self.logger.error(f"❌ MQTT connect failed, code {reason_code}")
 

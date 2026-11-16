@@ -76,10 +76,17 @@ def test_wallbox_ble_reconnect_keeps_one_client_while_broker_is_down(
 ):
     factory, clients = mqtt_clients
     create_client = factory.side_effect
+    connection_failures = []
 
     def broker_down(*args, **kwargs):
         client = create_client(*args, **kwargs)
-        client.connect.side_effect = ConnectionRefusedError("Broker offline")
+
+        def fail_connection():
+            client.on_connect(client, None, {}, 135, None)
+            client.on_disconnect(client, None, {}, 1, None)
+            connection_failures.append(135)
+
+        client.loop_start.side_effect = fail_connection
         return client
 
     factory.side_effect = broker_down
@@ -111,10 +118,15 @@ def test_wallbox_ble_reconnect_keeps_one_client_while_broker_is_down(
             await asyncio.wait_for(reconnected.wait(), 12)
             assert wallbox.connect.await_count == 2
             assert factory.call_count == 1
+            assert connection_failures == [135]
             clients[0].connect.assert_not_called()
             clients[0].connect_async.assert_called_once()
             clients[0].loop_start.assert_called_once()
             dev = bridge.wallbox_mqtt_by_addr["ble-test"]
+            assert not dev._connected
+            clients[0].reconnect.assert_not_called()
+            dev.on_connect(dev.client, None, {}, 0, None)
+            assert dev._connected
             published = threading.Event()
             publish_info = dev.client.publish.return_value
 

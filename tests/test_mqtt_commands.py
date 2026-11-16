@@ -152,6 +152,34 @@ def test_broker_reconnect_restores_availability_and_subscriptions(device):
     ]
 
 
+@pytest.mark.parametrize("reconnecting", [False, True])
+def test_connect_republishes_state_cached_while_disconnected(device, reconnecting):
+    if reconnecting:
+        device.on_connect(device.client, None, {}, 0, None)
+        device.on_disconnect(device.client, None, {}, 1, None)
+    assert not device._connected
+    device.entities.update({
+        "sensor": {"battery_soc": {}},
+        "switch": {"charging": {}},
+        "select": {"charging_mode": {}},
+    })
+    device.set_sensor_value({"battery_soc": 0, "extra_sensor": 42})
+    device.set_actuator_value("min_soc_on_grid", 80)
+    device.set_actuator_value("charging", "OFF")
+    device.set_actuator_value("charging_mode", "eco")
+    device.client.publish.reset_mock()
+
+    device.on_connect(device.client, None, {}, 0, None)
+
+    device.client.publish.assert_has_calls([
+        call("homeassistant/sensor/inverter_test/battery_soc/state", 0, retain=True),
+        call("homeassistant/sensor/inverter_test/extra_sensor/state", 42, retain=True),
+        call("homeassistant/number/inverter_test/min_soc_on_grid/state", 80, retain=True),
+        call("homeassistant/switch/inverter_test/charging/state", "OFF", retain=True),
+        call("homeassistant/select/inverter_test/charging_mode/state", "eco", retain=True),
+    ], any_order=True)
+
+
 def test_bridge_shutdown_drains_active_command_without_blocking_asyncio(device, monkeypatch):
     async def scenario():
         started = threading.Event()
