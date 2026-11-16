@@ -263,13 +263,16 @@ class RenacInverterDevice(RenacMqttDevice):
     def __init__(
             self,
             device_name: str,
-            serial_number: str,
+            serial_number: Optional[str],
             model: str,
             mqtt_host: str,
             mqtt_port: int = 1883,
             mqtt_user: Optional[str] = None,
             mqtt_password: Optional[str] = None,
+            ble_address: Optional[str] = None,
     ):
+        if not serial_number and not ble_address:
+            raise ValueError("An inverter serial number or BLE address is required")
         super().__init__(
             f"inverter_{serial_number}",
             device_name,
@@ -279,4 +282,5 @@ class RenacInverterDevice(RenacMqttDevice):
             mqtt_port,
             mqtt_user,
             mqtt_password,
+            client_identifier=f"inverter_{serial_number or ble_address}",
         )
