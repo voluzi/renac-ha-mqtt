@@ -164,6 +164,8 @@ def test_connect_republishes_state_cached_while_disconnected(device, reconnectin
         "select": {"charging_mode": {}},
     })
     device.set_sensor_value({"battery_soc": 0, "extra_sensor": 42})
+    device.set_sensor_value("nullable_sensor", 123)
+    device.set_sensor_value("nullable_sensor", None)
     device.set_actuator_value("min_soc_on_grid", 80)
     device.set_actuator_value("charging", "OFF")
     device.set_actuator_value("charging_mode", "eco")
@@ -178,6 +180,17 @@ def test_connect_republishes_state_cached_while_disconnected(device, reconnectin
         call("homeassistant/switch/inverter_test/charging/state", "OFF", retain=True),
         call("homeassistant/select/inverter_test/charging_mode/state", "eco", retain=True),
     ], any_order=True)
+    assert all(published.args[1] is not None for published in device.client.publish.call_args_list)
+
+
+def test_unknown_actuator_is_not_cached_or_republished(device):
+    assert not device.set_actuator_value("unknown_actuator", 42)
+    assert "unknown_actuator" not in device.state
+    device.on_connect(device.client, None, {}, 0, None)
+    assert not any(
+        "unknown_actuator" in published.args[0]
+        for published in device.client.publish.call_args_list
+    )
 
 
 def test_bridge_shutdown_drains_active_command_without_blocking_asyncio(device, monkeypatch):

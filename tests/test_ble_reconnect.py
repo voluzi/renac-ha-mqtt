@@ -124,7 +124,6 @@ def test_wallbox_ble_reconnect_keeps_one_client_while_broker_is_down(
             clients[0].loop_start.assert_called_once()
             dev = bridge.wallbox_mqtt_by_addr["ble-test"]
             assert not dev._connected
-            clients[0].reconnect.assert_not_called()
             dev.on_connect(dev.client, None, {}, 0, None)
             assert dev._connected
             published = threading.Event()

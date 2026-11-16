@@ -145,6 +145,8 @@ class RenacMqttDevice:
             self._register_actuators()
             with self._command_lock:
                 for key, value in self.state.copy().items():
+                    if value is None:
+                        continue
                     entity_type = self.get_entity_type(key) or "sensor"
                     topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
                     self.publish(topic, value, retain=True)
@@ -313,17 +315,18 @@ class RenacMqttDevice:
         keys to values. Only changed values are published.
         """
         updates = {}
-        if isinstance(key_or_dict, dict):
-            for k, v in key_or_dict.items():
-                if self._set_state(k, v):
-                    updates[k] = v
-        else:
-            if self._set_state(key_or_dict, value):
-                updates[key_or_dict] = value
+        with self._command_lock:
+            if isinstance(key_or_dict, dict):
+                for k, v in key_or_dict.items():
+                    if self._set_state(k, v):
+                        updates[k] = v
+            else:
+                if self._set_state(key_or_dict, value):
+                    updates[key_or_dict] = value
 
-        for k, v in updates.items():
-            topic = f"homeassistant/sensor/{self.device_id}/{k}/state"
-            self.client.publish(topic, v, retain=True)
+            for k, v in updates.items():
+                topic = f"homeassistant/sensor/{self.device_id}/{k}/state"
+                self.client.publish(topic, v, retain=True)
 
         if updates:
             self.logger.info(f"📤 Published sensor updates: {updates}")
@@ -339,22 +342,24 @@ class RenacMqttDevice:
 
     def set_actuator_callback(self, key: str, callback: ActuatorCallback,
                               value: Optional[Union[int, float, str, bool]] = None):
-        self._actuator_callbacks[key] = callback
-        self.logger.debug(f"✅ Callback registered for actuator: {key}")
-        if value is not None:
-            self._set_state(key, value)
-            topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
-            self.client.publish(topic, value, retain=True)
-            self.logger.info(f"📤 Initial state published for actuator {key}: {value}")
+        with self._command_lock:
+            self._actuator_callbacks[key] = callback
+            self.logger.debug(f"✅ Callback registered for actuator: {key}")
+            if value is not None:
+                self._set_state(key, value)
+                topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
+                self.client.publish(topic, value, retain=True)
+                self.logger.info(f"📤 Initial state published for actuator {key}: {value}")
 
     def set_actuator_value(self, key: str, value: ActuatorPayload) -> bool:
         """Update actuator state and publish MQTT message if it changed."""
-        if self._set_state(key, value):
-            entity_type = self.get_entity_type(key)
-            if entity_type is None:
-                return False
-            topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
-            self.client.publish(topic, value, retain=True)
-            self.logger.info(f"📤 Published actuator update: {key} = {value}")
-            return True
+        entity_type = self.get_entity_type(key)
+        if entity_type is None:
+            return False
+        with self._command_lock:
+            if self._set_state(key, value):
+                topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
+                self.client.publish(topic, value, retain=True)
+                self.logger.info(f"📤 Published actuator update: {key} = {value}")
+                return True
         return False
