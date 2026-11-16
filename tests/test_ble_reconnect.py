@@ -61,12 +61,10 @@ def test_inverter_ble_reconnect_keeps_one_mqtt_client(
             inverter.set_min_soc_on_grid.assert_awaited_once_with(100)
             bridge.shutdown_event.set()
             hold.set()
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            assert inverter.disconnect.await_count == 1
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        assert inverter.disconnect.await_count == 2
 
     asyncio.run(scenario())
 
@@ -142,11 +140,25 @@ def test_wallbox_ble_reconnect_keeps_one_client_while_broker_is_down(
             wallbox.set_max_output_current.assert_awaited_once_with(16)
             bridge.shutdown_event.set()
             hold.set()
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            assert wallbox.disconnect.await_count == 1
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        assert wallbox.disconnect.await_count == 2
 
     asyncio.run(scenario())
+
+
+def test_wallbox_notifications_after_shutdown_are_dropped(bridge_devices, mqtt_clients, monkeypatch):
+    monkeypatch.setattr(bridge, "shutdown_event", asyncio.Event())
+    callback = bridge.make_wallbox_callback("ble-test")
+    callback({"sn": "test", "model": "test", "state": "idle", "power": 100})
+    dev = bridge.wallbox_mqtt_by_addr["ble-test"]
+    original_state = dev.state.copy()
+    dev.disconnect()
+    bridge.shutdown_event.set()
+    dev.client.publish.reset_mock()
+
+    callback({"sn": "test", "model": "test", "state": "charging", "power": 200})
+
+    dev.client.publish.assert_not_called()
+    assert dev.state == original_state

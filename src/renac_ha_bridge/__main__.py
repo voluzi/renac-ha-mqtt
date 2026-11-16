@@ -104,10 +104,10 @@ def wrap_async_callback(loop: asyncio.AbstractEventLoop,
 def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
     """Create a per-wallbox callback that forwards telemetry to its MQTT device."""
     def _callback(parsed: Dict[str, Any]) -> None:
+        if shutdown_event.is_set():
+            return
         dev = wallbox_mqtt_by_addr.get(ble_addr)
         if dev is None:
-            if shutdown_event.is_set():
-                return
             # Build device on first telemetry (we need serial/model)
             dev = RenacWallboxDevice(
                 device_name=f"RENAC Wallbox",

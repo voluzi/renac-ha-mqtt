@@ -135,23 +135,23 @@ class RenacMqttDevice:
         self.client.publish(topic, payload, retain=retain)
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
-        if self._stopping:
-            return
-        if reason_code == 0:
-            self.logger.info("✅ MQTT connected")
-            self._connected = True
-            self.client.publish(f"homeassistant/{self.device_id}/availability", "online", retain=True)
-            self._register_sensors()
-            self._register_actuators()
-            with self._command_lock:
+        with self._command_lock:
+            if self._stopping:
+                return
+            if reason_code == 0:
+                self.logger.info("✅ MQTT connected")
+                self._connected = True
+                self.client.publish(f"homeassistant/{self.device_id}/availability", "online", retain=True)
+                self._register_sensors()
+                self._register_actuators()
                 for key, value in self.state.copy().items():
                     if value is None:
                         continue
                     entity_type = self.get_entity_type(key) or "sensor"
                     topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
                     self.publish(topic, value, retain=True)
-        else:
-            self.logger.error(f"❌ MQTT connect failed, code {reason_code}")
+            else:
+                self.logger.error(f"❌ MQTT connect failed, code {reason_code}")
 
     def on_disconnect(self, client, userdata, flags, reason_code, properties):
         self.logger.warning("⚠️ MQTT disconnected (reason: %s)", reason_code)

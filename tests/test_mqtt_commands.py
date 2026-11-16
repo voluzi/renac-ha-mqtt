@@ -234,6 +234,14 @@ def test_disconnect_flushes_retained_offline_before_closing(device):
     assert calls.index(offline) < calls.index(wait_call) < calls.index(call.disconnect())
 
 
+def test_connect_during_shutdown_publishes_nothing(device):
+    device._stopping = True
+    device.on_connect(device.client, None, {}, 0, None)
+    device.client.publish.assert_not_called()
+    device.client.subscribe.assert_not_called()
+    assert not device._connected
+
+
 def test_disconnect_still_closes_when_offline_publish_fails(device):
     device.client.publish.return_value.wait_for_publish.side_effect = RuntimeError("Broker offline")
     device.disconnect()
