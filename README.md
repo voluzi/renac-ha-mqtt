@@ -90,6 +90,16 @@ This will connect to both the inverter and the wallbox via BLE and publish their
 
 MQTT client IDs include the device serial number (or BLE address when missing), hostname, and process ID. Set `MQTT_CLIENT_ID_PREFIX` to override the hostname portion for a bridge instance; Home Assistant topics and entity IDs are independent of this setting.
 
+Set `LOG_LEVEL` to control bridge and RENAC library logging (default: `INFO`).
+Use `LOG_LEVEL=DEBUG` to include BLE request and response hex dumps; third-party
+BLE and MQTT loggers stay at INFO.
+
+Number and select commands wait for a quiet interval before applying the latest
+value per entity. Set `RENAC_COMMAND_DEBOUNCE_S` to change this interval (default:
+`1.0` seconds), or `0` to apply every command immediately. Switch commands always
+apply immediately. If a write fails, the bridge reads and republishes the current
+device value when available.
+
 ---
 
 ## 📚 Related

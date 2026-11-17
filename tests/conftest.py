@@ -38,3 +38,8 @@ def bridge_devices(monkeypatch, mqtt_clients):
     yield
     for dev in [*bridge.inverter_mqtt_by_addr.values(), *bridge.wallbox_mqtt_by_addr.values()]:
         dev.disconnect()
+
+
+@pytest.fixture(autouse=True)
+def immediate_commands(monkeypatch):
+    monkeypatch.setattr(mqtt_device, "COMMAND_DEBOUNCE_S", 0)

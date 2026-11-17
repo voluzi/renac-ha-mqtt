@@ -13,6 +13,9 @@ ActuatorPayload = Union[int, float, str, bool, Dict[str, Any], List[Any]]
 ActuatorCallback = Callable[[ActuatorPayload], Union[Optional[bool], Future[Optional[bool]]]]
 COMMAND_DRAIN_TIMEOUT_S = 2.0
 OFFLINE_PUBLISH_TIMEOUT_S = 2.0
+BLE_WRITE_TIMEOUT_S = 30.0
+COMMAND_DEBOUNCE_S = float(os.getenv("RENAC_COMMAND_DEBOUNCE_S", "1.0"))
+ActuatorRefresh = Callable[[], Union[Optional[ActuatorPayload], Future]]
 
 
 class SensorConfig(TypedDict, total=False):
@@ -67,6 +70,11 @@ class RenacMqttDevice:
         self.mqtt_password = mqtt_password
         self.state = {}
         self._actuator_callbacks: Dict[str, ActuatorCallback] = {}
+        self._actuator_refreshers: Dict[str, ActuatorRefresh] = {}
+        self.command_debounce_s = COMMAND_DEBOUNCE_S
+        self._pending_values: Dict[str, ActuatorPayload] = {}
+        self._debounce_timers: Dict[str, threading.Timer] = {}
+        self._superseded: Dict[str, int] = {}
         self._command_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"renac-{device_id}")
         self._command_lock = threading.Lock()
         self._commands: set[Future] = set()
@@ -74,7 +82,7 @@ class RenacMqttDevice:
         self._stopping = False
         self._cancel_commands = False
 
-        self.logger = logging.getLogger(f"renac.{device_id}")
+        self.logger = logging.getLogger(f"renac_ha_mqtt.{device_id}")
 
         self.client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
@@ -102,6 +110,13 @@ class RenacMqttDevice:
         """Drain commands briefly and flush offline availability before closing MQTT."""
         with self._command_lock:
             self._stopping = True
+            for timer in self._debounce_timers.values():
+                timer.cancel()
+            for key, value in self._pending_values.items():
+                self.logger.warning("Dropping pending command %s=%r on disconnect", key, value)
+            self._debounce_timers.clear()
+            self._pending_values.clear()
+            self._superseded.clear()
             commands = list(self._commands)
         self._command_worker.shutdown(wait=False, cancel_futures=True)
         pending = [command for command in commands if not command.done()]
@@ -169,11 +184,23 @@ class RenacMqttDevice:
                 except json.JSONDecodeError:
                     value = payload
 
-                callback = self._actuator_callbacks[key]
-                self.logger.info(f"🔧 Received command for {key}: {value}")
+                self.logger.debug("Received command for %s: %r", key, value)
                 with self._command_lock:
                     if self._stopping:
                         return
+                    if self.command_debounce_s > 0 and self.get_entity_type(key) in ("number", "select"):
+                        if key in self._pending_values:
+                            self._superseded[key] = self._superseded.get(key, 0) + 1
+                        self._pending_values[key] = value
+                        timer = self._debounce_timers.pop(key, None)
+                        if timer is not None:
+                            timer.cancel()
+                        timer = threading.Timer(self.command_debounce_s, self._flush, (key,))
+                        timer.daemon = True
+                        self._debounce_timers[key] = timer
+                        timer.start()
+                        return
+                    callback = self._actuator_callbacks[key]
                     command = self._command_worker.submit(self._execute_command, key, value, callback)
                     self._commands.add(command)
                 command.add_done_callback(self._command_finished)
@@ -181,6 +208,31 @@ class RenacMqttDevice:
                 self.logger.warning(f"⚠️ No callback found for actuator key: {key}")
         else:
             self.logger.debug(f"📩 Unhandled MQTT message: {msg.topic} => {msg.payload}")
+
+    def _flush(self, key: str) -> None:
+        with self._command_lock:
+            # A cancelled timer may already be waiting for this lock.
+            if self._debounce_timers.get(key) is not threading.current_thread():
+                return
+            self._debounce_timers.pop(key, None)
+            if self._stopping:
+                return
+            command = self._command_worker.submit(self._execute_latest, key)
+            self._commands.add(command)
+        command.add_done_callback(self._command_finished)
+
+    def _execute_latest(self, key: str) -> None:
+        with self._command_lock:
+            if self._stopping or key not in self._pending_values:
+                return
+            value = self._pending_values.pop(key)
+            superseded = self._superseded.pop(key, 0)
+            timer = self._debounce_timers.pop(key, None)
+            if timer is not None:
+                timer.cancel()
+            callback = self._actuator_callbacks[key]
+        self.logger.info("Applying %s=%r (%d superseded)", key, value, superseded)
+        self._execute_command(key, value, callback)
 
     def _command_finished(self, command: Future) -> None:
         with self._command_lock:
@@ -199,18 +251,60 @@ class RenacMqttDevice:
                         result.cancel()
                 result = result.result()
             with self._command_lock:
-                if result is False or self._cancel_commands:
-                    self.logger.warning(f"⚠️ Command for {key} failed or was rejected")
+                if result and not self._cancel_commands:
+                    self.logger.info("✅ Command for %s executed", key)
+                    self._set_state(key, value)
+                    topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
+                    self.client.publish(topic, value, retain=True)
                     return
-                self.logger.info(f"✅ Command for {key} executed")
-                self._set_state(key, value)
-                topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
-                self.client.publish(topic, value, retain=True)
+            reason = "not confirmed (no response)" if result is None else "rejected by device"
         except Exception as exc:
-            self.logger.warning("⚠️ Error executing callback for %s: %s", key, str(exc) or type(exc).__name__)
+            reason = f"failed: {str(exc) or type(exc).__name__}"
         finally:
             with self._command_lock:
                 self._active_write = None
+        with self._command_lock:
+            if self._cancel_commands:
+                reason = "cancelled (shutdown)"
+        self.logger.warning("Command %s=%r %s", key, value, reason)
+        self._refresh_actuator(key)
+
+    def _refresh_actuator(self, key: str) -> None:
+        with self._command_lock:
+            if key in self._pending_values or self._stopping:
+                return
+            refresh = self._actuator_refreshers.get(key)
+        if refresh is None:
+            return
+        result = None
+        try:
+            result = refresh()
+            if isinstance(result, Future):
+                future = result
+                with self._command_lock:
+                    self._active_write = future
+                    if self._cancel_commands:
+                        future.cancel()
+                try:
+                    result = future.result(timeout=BLE_WRITE_TIMEOUT_S)
+                except Exception:
+                    future.cancel()
+                    raise
+            with self._command_lock:
+                if key in self._pending_values or self._stopping:
+                    return
+                if result is not None:
+                    self._set_state(key, result)
+                    topic = f"homeassistant/{self.get_entity_type(key)}/{self.device_id}/{key}/state"
+                    self.client.publish(topic, result, retain=True)
+                    self.logger.info("Republished %s=%r from device after failed command", key, result)
+                    return
+        except Exception as exc:
+            self.logger.debug("Refresh %s failed: %s", key, str(exc) or type(exc).__name__)
+        finally:
+            with self._command_lock:
+                self._active_write = None
+        self.logger.warning("Could not refresh %s after failed command", key)
 
     def _register_sensors(self):
         for key, sensor in self.entities.get("sensor", {}).items():
@@ -329,7 +423,7 @@ class RenacMqttDevice:
                 self.client.publish(topic, v, retain=True)
 
         if updates:
-            self.logger.info(f"📤 Published sensor updates: {updates}")
+            self.logger.debug(f"📤 Published sensor updates: {updates}")
 
         return bool(updates)
 
@@ -341,9 +435,14 @@ class RenacMqttDevice:
         return None
 
     def set_actuator_callback(self, key: str, callback: ActuatorCallback,
-                              value: Optional[Union[int, float, str, bool]] = None):
+                              value: Optional[Union[int, float, str, bool]] = None,
+                              *, refresh: Optional[ActuatorRefresh] = None):
         with self._command_lock:
             self._actuator_callbacks[key] = callback
+            if refresh is None:
+                self._actuator_refreshers.pop(key, None)
+            else:
+                self._actuator_refreshers[key] = refresh
             self.logger.debug(f"✅ Callback registered for actuator: {key}")
             if value is not None:
                 self._set_state(key, value)
@@ -351,10 +450,10 @@ class RenacMqttDevice:
                 self.client.publish(topic, value, retain=True)
                 self.logger.info(f"📤 Initial state published for actuator {key}: {value}")
 
-    def set_actuator_value(self, key: str, value: ActuatorPayload) -> bool:
+    def set_actuator_value(self, key: str, value: Optional[ActuatorPayload]) -> bool:
         """Update actuator state and publish MQTT message if it changed."""
         entity_type = self.get_entity_type(key)
-        if entity_type is None:
+        if value is None or entity_type is None:
             return False
         with self._command_lock:
             if self._set_state(key, value):

@@ -162,3 +162,89 @@ def test_wallbox_notifications_after_shutdown_are_dropped(bridge_devices, mqtt_c
 
     dev.client.publish.assert_not_called()
     assert dev.state == original_state
+
+
+@pytest.mark.parametrize("overview", [{"load_power": 123, "battery_soc": 80}, None])
+def test_partial_overview_publishes_only_present_keys(
+    bridge_devices, mqtt_clients, monkeypatch, overview,
+):
+    async def scenario():
+        monkeypatch.setattr(bridge, "shutdown_event", asyncio.Event())
+        monkeypatch.setattr(bridge, "POLL_INTERVAL_S", 0)
+        inverter = MagicMock(spec=bridge.RenacInverterBLE)
+        for name in dir(bridge.RenacInverterBLE):
+            if name.startswith("get_"):
+                setattr(inverter, name, AsyncMock(return_value=None))
+        inverter.get_info.return_value = {"sn": "test", "model": "test"}
+        polled = asyncio.Event()
+        hold = asyncio.Event()
+        calls = 0
+
+        async def poll():
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                polled.set()
+                await hold.wait()
+            return overview
+
+        inverter.get_power_and_energy_overview.side_effect = poll
+        monkeypatch.setattr(bridge, "RenacInverterBLE", lambda addr: inverter)
+        task = asyncio.create_task(bridge.run_inverter_task("ble-test"))
+        try:
+            await asyncio.wait_for(polled.wait(), 2)
+            dev = bridge.inverter_mqtt_by_addr["ble-test"]
+            assert dev.state == (overview or {})
+            sensor_values = {
+                c.args[0].split("/")[-2]: c.args[1]
+                for c in dev.client.publish.call_args_list
+                if c.args[0].startswith("homeassistant/sensor/") and c.args[0].endswith("/state")
+            }
+            assert sensor_values == (overview or {})
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_missing_inverter_info_reconnects_without_creating_device(
+    bridge_devices, mqtt_clients, monkeypatch, caplog,
+):
+    async def scenario():
+        monkeypatch.setattr(bridge, "shutdown_event", asyncio.Event())
+        inverter = MagicMock(spec=bridge.RenacInverterBLE)
+        inverter.get_info.return_value = None
+        reconnected = asyncio.Event()
+        hold = asyncio.Event()
+        attempts = 0
+
+        async def connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                reconnected.set()
+                await hold.wait()
+
+        inverter.connect.side_effect = connect
+        monkeypatch.setattr(bridge, "RenacInverterBLE", lambda addr: inverter)
+        task = asyncio.create_task(bridge.run_inverter_task("ble-test"))
+        try:
+            await asyncio.wait_for(reconnected.wait(), 2)
+            assert not bridge.inverter_mqtt_by_addr
+            mqtt_clients[0].assert_not_called()
+            assert "could not read inverter info" in caplog.text
+            assert not any(record.exc_info for record in caplog.records)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_enabling_period_does_not_zero_window_after_failed_read():
+    async def scenario():
+        get_period = AsyncMock(return_value=None)
+        set_period = AsyncMock(return_value=True)
+        setter = bridge._period_setter(get_period, set_period, "enabled")
+        assert await setter("ON") is False
+        set_period.assert_not_awaited()
+    asyncio.run(scenario())
