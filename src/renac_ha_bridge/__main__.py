@@ -10,12 +10,20 @@ from typing import Any, Callable, Awaitable, Optional, Dict, Iterable
 
 from renac_ble import RenacWallboxBLE, RenacInverterBLE, WorkMode, GridChargePeriod, ChargingMode
 from renac_ha_mqtt import RenacInverterDevice, RenacWallboxDevice
+from renac_ha_mqtt.mqtt_device import BLE_WRITE_TIMEOUT_S
 
 # --------------------------------------------------------------------------- #
 # Config & logging
 # --------------------------------------------------------------------------- #
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("renac_ha_bridge")
+
+
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    for name in ("renac_ble", "renac_ha_mqtt", "renac_ha_bridge"):
+        logging.getLogger(name).setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
 
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
@@ -35,7 +43,6 @@ POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
 WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "10"))
 # Separate interval for refreshing actuator states
 ACTUATOR_POLL_INTERVAL_S = float(os.getenv("RENAC_ACTUATOR_POLL_INTERVAL_S", "30"))
-BLE_WRITE_TIMEOUT_S = 30.0
 BLE_RECONNECT_DELAY_S = 5.0
 
 shutdown_event = asyncio.Event()
@@ -89,11 +96,21 @@ def wrap_async_callback(loop: asyncio.AbstractEventLoop,
             try:
                 return await asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S)
             except Exception as exc:
-                logging.warning("Error executing %s: %s",
+                logger.warning("Error executing %s: %s",
                                 getattr(coro_func, "__name__", coro_func), str(exc) or type(exc).__name__)
                 return False
 
         return asyncio.run_coroutine_threadsafe(execute(), loop)
+    return wrapper
+
+
+def wrap_async_refresh(loop: asyncio.AbstractEventLoop,
+                       coro_func: Callable[[], Awaitable[Any]]) -> Callable[[], Future]:
+    """Schedule a fresh device read with a BLE timeout."""
+    def wrapper() -> Future:
+        return asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(coro_func(), timeout=BLE_WRITE_TIMEOUT_S), loop,
+        )
     return wrapper
 
 
@@ -121,7 +138,7 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
             )
             dev.connect()
             wallbox_mqtt_by_addr[ble_addr] = dev
-            logging.info("🔌 MQTT device created for wallbox %s (sn=%s model=%s)",
+            logger.info("🔌 MQTT device created for wallbox %s (sn=%s model=%s)",
                          ble_addr, parsed.get("sn"), parsed.get("model"))
         dev.set_sensor_value({k: v for k, v in parsed.items() if k not in WALLBOX_EXCLUDED_KEYS})
         if parsed.get("state"):
@@ -187,8 +204,17 @@ async def _wire_wallbox_actuators(dev: RenacWallboxDevice, wallbox: RenacWallbox
         "allowed_end_hour": _window_setter("end_hour"),
         "allowed_end_minute": _window_setter("end_minute"),
     }
+
+    def settings_refresh(key: str) -> Callable[[], Awaitable[Any]]:
+        async def refresh() -> Any:
+            return _wallbox_actuator_state(await wallbox.get_basic_settings()).get(key)
+        return refresh
+
     for key, setter in setters.items():
-        dev.set_actuator_callback(key, wrap_async_callback(loop, setter), state.get(key))
+        dev.set_actuator_callback(
+            key, wrap_async_callback(loop, setter), state.get(key),
+            refresh=wrap_async_refresh(loop, settings_refresh(key)) if key != "charging" else None,
+        )
 
 
 async def run_wallbox_task(ble_addr: str) -> None:
@@ -200,7 +226,7 @@ async def run_wallbox_task(ble_addr: str) -> None:
     while not shutdown_event.is_set():
         try:
             await wallbox.connect()
-            logging.info("⚡️ Connected to wallbox %s", ble_addr)
+            logger.info("⚡️ Connected to wallbox %s", ble_addr)
             last_actuator_poll = 0.0
             last_status_poll = 0.0
 
@@ -232,8 +258,12 @@ async def run_wallbox_task(ble_addr: str) -> None:
 
                 await asyncio.sleep(POLL_INTERVAL_S)
 
+        except ConnectionError as exc:
+            logger.warning("Wallbox %s link lost: %s; reconnecting in %ss",
+                           ble_addr, exc, BLE_RECONNECT_DELAY_S)
+            await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         except Exception:
-            logging.exception("Wallbox loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
+            logger.exception("Wallbox loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
             await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         finally:
             try:
@@ -259,6 +289,16 @@ def _period_to_mqtt_state(period: Optional[GridChargePeriod]) -> Dict[str, Any]:
     }
 
 
+def _period_setter(get_period, set_period, field: str) -> Callable[[Any], Awaitable[bool]]:
+    async def setter(value: Any) -> bool:
+        period = await get_period()
+        if period is None:
+            return False
+        setattr(period, field, value == "ON" if field == "enabled" else int(value))
+        return await set_period(period)
+    return setter
+
+
 async def run_inverter_task(ble_addr: str) -> None:
     """Loop to keep an inverter connected, publish telemetry and wire actuators."""
     inverter = RenacInverterBLE(ble_addr)
@@ -266,11 +306,13 @@ async def run_inverter_task(ble_addr: str) -> None:
     while not shutdown_event.is_set():
         try:
             await inverter.connect()
-            logging.info("⚡️ Connected to inverter %s", ble_addr)
+            logger.info("⚡️ Connected to inverter %s", ble_addr)
 
             mqtt_dev = inverter_mqtt_by_addr.get(ble_addr)
             if mqtt_dev is None:
                 info = await inverter.get_info()
+                if info is None:
+                    raise ConnectionError("could not read inverter info")
                 if shutdown_event.is_set():
                     return
                 mqtt_dev = RenacInverterDevice(
@@ -287,36 +329,18 @@ async def run_inverter_task(ble_addr: str) -> None:
                 inverter_mqtt_by_addr[ble_addr] = mqtt_dev
 
             loop = asyncio.get_running_loop()
-            mqtt_dev.set_actuator_callback(
-                "max_charge_current",
-                wrap_async_callback(loop, inverter.set_max_charge_current),
-                await inverter.get_max_charge_current(),
-            )
-            mqtt_dev.set_actuator_callback(
-                "max_discharge_current",
-                wrap_async_callback(loop, inverter.set_max_discharge_current),
-                await inverter.get_max_discharge_current(),
-            )
-            mqtt_dev.set_actuator_callback(
-                "min_soc",
-                wrap_async_callback(loop, inverter.set_min_soc),
-                await inverter.get_min_soc(),
-            )
-            mqtt_dev.set_actuator_callback(
-                "min_soc_on_grid",
-                wrap_async_callback(loop, inverter.set_min_soc_on_grid),
-                await inverter.get_min_soc_on_grid(),
-            )
-            mqtt_dev.set_actuator_callback(
-                "export_limit",
-                wrap_async_callback(loop, inverter.set_export_limit),
-                await inverter.get_export_limit(),
-            )
-            mqtt_dev.set_actuator_callback(
-                "power_limit_percent",
-                wrap_async_callback(loop, inverter.set_power_limit_percent),
-                await inverter.get_power_limit_percent(),
-            )
+
+            def wire(key, setter, refresh, initial):
+                mqtt_dev.set_actuator_callback(
+                    key, wrap_async_callback(loop, setter), initial,
+                    refresh=wrap_async_refresh(loop, refresh),
+                )
+
+            for key in ("max_charge_current", "max_discharge_current", "min_soc",
+                        "min_soc_on_grid", "export_limit", "power_limit_percent"):
+                get_value = getattr(inverter, f"get_{key}")
+                wire(key, getattr(inverter, f"set_{key}"), get_value, await get_value())
+
             async def _set_work_mode(value: str) -> bool:
                 try:
                     mode = WorkMode[value.upper()]
@@ -324,207 +348,26 @@ async def run_inverter_task(ble_addr: str) -> None:
                     return False
                 return await inverter.set_work_mode(mode)
 
-            current_mode = await inverter.get_work_mode()
-            mqtt_dev.set_actuator_callback(
-                "work_mode",
-                wrap_async_callback(loop, _set_work_mode),
-                current_mode.name.lower() if current_mode is not None else None,
-            )
+            async def _get_work_mode() -> Optional[str]:
+                mode = await inverter.get_work_mode()
+                return mode.name.lower() if mode is not None else None
 
-            # ----------------------------------------------------------------- #
-            # Force Time Period 1 callbacks
-            # ----------------------------------------------------------------- #
-            async def _set_force_time_p1_enabled(value: str) -> bool:
-                period = await inverter.get_force_time_period1()
-                if period is None:
-                    period = GridChargePeriod(False, 0, 0, 0, 0)
-                period.enabled = value == "ON"
-                return await inverter.set_force_time_period1(period)
+            wire("work_mode", _set_work_mode, _get_work_mode, await _get_work_mode())
 
-            async def _set_force_time_p1_start_hour(value: int) -> bool:
-                period = await inverter.get_force_time_period1()
-                if period is None:
-                    return False
-                period.start_hour = int(value)
-                return await inverter.set_force_time_period1(period)
+            def period_refresh(get_period, field: str) -> Callable[[], Awaitable[Any]]:
+                async def refresh() -> Any:
+                    return _period_to_mqtt_state(await get_period()).get(field)
+                return refresh
 
-            async def _set_force_time_p1_start_minute(value: int) -> bool:
-                period = await inverter.get_force_time_period1()
-                if period is None:
-                    return False
-                period.start_minute = int(value)
-                return await inverter.set_force_time_period1(period)
-
-            async def _set_force_time_p1_end_hour(value: int) -> bool:
-                period = await inverter.get_force_time_period1()
-                if period is None:
-                    return False
-                period.end_hour = int(value)
-                return await inverter.set_force_time_period1(period)
-
-            async def _set_force_time_p1_end_minute(value: int) -> bool:
-                period = await inverter.get_force_time_period1()
-                if period is None:
-                    return False
-                period.end_minute = int(value)
-                return await inverter.set_force_time_period1(period)
-
-            p1 = _period_to_mqtt_state(await inverter.get_force_time_period1())
-            mqtt_dev.set_actuator_callback(
-                "force_time_p1_enabled",
-                wrap_async_callback(loop, _set_force_time_p1_enabled),
-                p1.get("enabled"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p1_start_hour",
-                wrap_async_callback(loop, _set_force_time_p1_start_hour),
-                p1.get("start_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p1_start_minute",
-                wrap_async_callback(loop, _set_force_time_p1_start_minute),
-                p1.get("start_minute"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p1_end_hour",
-                wrap_async_callback(loop, _set_force_time_p1_end_hour),
-                p1.get("end_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p1_end_minute",
-                wrap_async_callback(loop, _set_force_time_p1_end_minute),
-                p1.get("end_minute"),
-            )
-
-            # ----------------------------------------------------------------- #
-            # Force Time Period 2 callbacks
-            # ----------------------------------------------------------------- #
-            async def _set_force_time_p2_enabled(value: str) -> bool:
-                period = await inverter.get_force_time_period2()
-                if period is None:
-                    period = GridChargePeriod(False, 0, 0, 0, 0)
-                period.enabled = value == "ON"
-                return await inverter.set_force_time_period2(period)
-
-            async def _set_force_time_p2_start_hour(value: int) -> bool:
-                period = await inverter.get_force_time_period2()
-                if period is None:
-                    return False
-                period.start_hour = int(value)
-                return await inverter.set_force_time_period2(period)
-
-            async def _set_force_time_p2_start_minute(value: int) -> bool:
-                period = await inverter.get_force_time_period2()
-                if period is None:
-                    return False
-                period.start_minute = int(value)
-                return await inverter.set_force_time_period2(period)
-
-            async def _set_force_time_p2_end_hour(value: int) -> bool:
-                period = await inverter.get_force_time_period2()
-                if period is None:
-                    return False
-                period.end_hour = int(value)
-                return await inverter.set_force_time_period2(period)
-
-            async def _set_force_time_p2_end_minute(value: int) -> bool:
-                period = await inverter.get_force_time_period2()
-                if period is None:
-                    return False
-                period.end_minute = int(value)
-                return await inverter.set_force_time_period2(period)
-
-            p2 = _period_to_mqtt_state(await inverter.get_force_time_period2())
-            mqtt_dev.set_actuator_callback(
-                "force_time_p2_enabled",
-                wrap_async_callback(loop, _set_force_time_p2_enabled),
-                p2.get("enabled"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p2_start_hour",
-                wrap_async_callback(loop, _set_force_time_p2_start_hour),
-                p2.get("start_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p2_start_minute",
-                wrap_async_callback(loop, _set_force_time_p2_start_minute),
-                p2.get("start_minute"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p2_end_hour",
-                wrap_async_callback(loop, _set_force_time_p2_end_hour),
-                p2.get("end_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "force_time_p2_end_minute",
-                wrap_async_callback(loop, _set_force_time_p2_end_minute),
-                p2.get("end_minute"),
-            )
-
-            # ----------------------------------------------------------------- #
-            # Backup Mode Grid Charge callbacks
-            # ----------------------------------------------------------------- #
-            async def _set_backup_charge_enabled(value: str) -> bool:
-                period = await inverter.get_backup_grid_charge()
-                if period is None:
-                    period = GridChargePeriod(False, 0, 0, 0, 0)
-                period.enabled = value == "ON"
-                return await inverter.set_backup_grid_charge(period)
-
-            async def _set_backup_charge_start_hour(value: int) -> bool:
-                period = await inverter.get_backup_grid_charge()
-                if period is None:
-                    return False
-                period.start_hour = int(value)
-                return await inverter.set_backup_grid_charge(period)
-
-            async def _set_backup_charge_start_minute(value: int) -> bool:
-                period = await inverter.get_backup_grid_charge()
-                if period is None:
-                    return False
-                period.start_minute = int(value)
-                return await inverter.set_backup_grid_charge(period)
-
-            async def _set_backup_charge_end_hour(value: int) -> bool:
-                period = await inverter.get_backup_grid_charge()
-                if period is None:
-                    return False
-                period.end_hour = int(value)
-                return await inverter.set_backup_grid_charge(period)
-
-            async def _set_backup_charge_end_minute(value: int) -> bool:
-                period = await inverter.get_backup_grid_charge()
-                if period is None:
-                    return False
-                period.end_minute = int(value)
-                return await inverter.set_backup_grid_charge(period)
-
-            backup = _period_to_mqtt_state(await inverter.get_backup_grid_charge())
-            mqtt_dev.set_actuator_callback(
-                "backup_charge_enabled",
-                wrap_async_callback(loop, _set_backup_charge_enabled),
-                backup.get("enabled"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "backup_charge_start_hour",
-                wrap_async_callback(loop, _set_backup_charge_start_hour),
-                backup.get("start_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "backup_charge_start_minute",
-                wrap_async_callback(loop, _set_backup_charge_start_minute),
-                backup.get("start_minute"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "backup_charge_end_hour",
-                wrap_async_callback(loop, _set_backup_charge_end_hour),
-                backup.get("end_hour"),
-            )
-            mqtt_dev.set_actuator_callback(
-                "backup_charge_end_minute",
-                wrap_async_callback(loop, _set_backup_charge_end_minute),
-                backup.get("end_minute"),
-            )
+            for prefix, get_period, set_period in (
+                ("force_time_p1", inverter.get_force_time_period1, inverter.set_force_time_period1),
+                ("force_time_p2", inverter.get_force_time_period2, inverter.set_force_time_period2),
+                ("backup_charge", inverter.get_backup_grid_charge, inverter.set_backup_grid_charge),
+            ):
+                initial = _period_to_mqtt_state(await get_period())
+                for field in ("enabled", "start_hour", "start_minute", "end_hour", "end_minute"):
+                    wire(f"{prefix}_{field}", _period_setter(get_period, set_period, field),
+                         period_refresh(get_period, field), initial.get(field))
 
             last_actuator_poll = time.monotonic()
 
@@ -533,7 +376,8 @@ async def run_inverter_task(ble_addr: str) -> None:
                 if shutdown_event.is_set():
                     await asyncio.Future()
                 overview = await inverter.get_power_and_energy_overview()
-                mqtt_dev.set_sensor_value(overview)
+                if overview:
+                    mqtt_dev.set_sensor_value(overview)
 
                 now = time.monotonic()
                 if now - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
@@ -594,8 +438,12 @@ async def run_inverter_task(ble_addr: str) -> None:
                     raise ConnectionError(f"Inverter {ble_addr} disconnected")
                 await asyncio.sleep(POLL_INTERVAL_S)
 
+        except ConnectionError as exc:
+            logger.warning("Inverter %s link lost: %s; reconnecting in %ss",
+                           ble_addr, exc, BLE_RECONNECT_DELAY_S)
+            await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         except Exception:
-            logging.exception("Inverter loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
+            logger.exception("Inverter loop error (%s). Reconnecting in %ss...", ble_addr, BLE_RECONNECT_DELAY_S)
             await asyncio.sleep(BLE_RECONNECT_DELAY_S)
         finally:
             try:
@@ -636,10 +484,11 @@ async def _run_all(inverter_addrs: Iterable[str], wallbox_addrs: Iterable[str]) 
 
 
 def main() -> None:
+    configure_logging()
     inverter_addrs = _resolve_inverter_addrs()
     wallbox_addrs = _resolve_wallbox_addrs()
 
-    logging.info("Starting RENAC bridge | inverters=%s | wallboxes=%s",
+    logger.info("Starting RENAC bridge | inverters=%s | wallboxes=%s",
                  inverter_addrs or "[]", wallbox_addrs or "[]")
 
     loop = asyncio.new_event_loop()

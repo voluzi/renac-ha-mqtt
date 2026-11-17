@@ -461,3 +461,35 @@ def test_debounced_command_uses_callback_registered_after_reconnect(device):
     device.set_actuator_callback("min_soc_on_grid", lambda value: values.append(("new", value)) or True)
     wait_for_debounce(device)
     assert values == [("new", 13)]
+
+
+def test_failed_command_waits_for_async_refresh(device):
+    async def scenario():
+        refreshed = asyncio.Event()
+        published = threading.Event()
+
+        async def refresh():
+            await asyncio.sleep(0)
+            refreshed.set()
+            return 0
+
+        device.set_actuator_callback(
+            "min_soc_on_grid", lambda value: None, 50,
+            refresh=bridge.wrap_async_refresh(asyncio.get_running_loop(), refresh),
+        )
+        device.client.publish.reset_mock()
+        publish_info = device.client.publish.return_value
+
+        def publish(*args, **kwargs):
+            published.set()
+            return publish_info
+
+        device.client.publish.side_effect = publish
+        await asyncio.to_thread(device.on_message, None, None, message())
+        assert await asyncio.to_thread(published.wait, 2)
+        assert refreshed.is_set()
+        assert device.state["min_soc_on_grid"] == 0
+        device.client.publish.assert_called_once_with(
+            "homeassistant/number/inverter_test/min_soc_on_grid/state", 0, retain=True,
+        )
+    asyncio.run(scenario())
