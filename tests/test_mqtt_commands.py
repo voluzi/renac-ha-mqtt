@@ -493,3 +493,22 @@ def test_failed_command_waits_for_async_refresh(device):
             "homeassistant/number/inverter_test/min_soc_on_grid/state", 0, retain=True,
         )
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [ConnectionError("BLE link lost"), TimeoutError()])
+def test_async_command_failure_logs_once_with_its_cause(device, failure, caplog):
+    async def scenario():
+        async def setter(value):
+            raise failure
+
+        device.set_actuator_callback(
+            "min_soc_on_grid", bridge.wrap_async_callback(asyncio.get_running_loop(), setter), 50,
+        )
+        device.client.publish.reset_mock()
+        await asyncio.to_thread(device.on_message, None, None, message())
+        await asyncio.to_thread(wait_for_debounce, device)
+        assert device.state["min_soc_on_grid"] == 50
+        device.client.publish.assert_not_called()
+        assert len(caplog.records) == 1
+        assert f"Command min_soc_on_grid=100 failed: {str(failure) or type(failure).__name__}" in caplog.text
+    asyncio.run(scenario())

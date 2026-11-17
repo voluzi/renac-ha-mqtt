@@ -92,15 +92,9 @@ def wrap_async_callback(loop: asyncio.AbstractEventLoop,
                         ) -> Callable[[Any], Future[Optional[bool]]]:
     """Schedule a cancellable async setter with a BLE write timeout."""
     def wrapper(value: Any) -> Future[Optional[bool]]:
-        async def execute() -> Optional[bool]:
-            try:
-                return await asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S)
-            except Exception as exc:
-                logger.warning("Error executing %s: %s",
-                                getattr(coro_func, "__name__", coro_func), str(exc) or type(exc).__name__)
-                return False
-
-        return asyncio.run_coroutine_threadsafe(execute(), loop)
+        return asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(coro_func(value), timeout=BLE_WRITE_TIMEOUT_S), loop,
+        )
     return wrapper
 
 
