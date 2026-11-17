@@ -306,3 +306,158 @@ def test_shutdown_cancels_hung_write_before_stopping_ble(device, monkeypatch):
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def wait_for_debounce(device):
+    with device._command_lock:
+        timers = list(device._debounce_timers.values())
+    for timer in timers:
+        timer.join(timeout=2)
+        assert not timer.is_alive(), "Debounce timer did not finish"
+    device._command_worker.submit(lambda: None).result(timeout=2)
+
+
+def test_rapid_number_commands_only_write_last_value(device):
+    device.command_debounce_s = 0.05
+    values = []
+    device.set_actuator_callback("min_soc_on_grid", lambda value: values.append(value) or True)
+    for value in (10, 11, 12, 13):
+        device.on_message(None, None, message(value=value))
+    wait_for_debounce(device)
+    assert values == [13]
+    device.client.publish.assert_called_once_with(
+        "homeassistant/number/inverter_test/min_soc_on_grid/state", 13, retain=True,
+    )
+
+
+def test_debounce_is_per_entity(device):
+    device.command_debounce_s = 0.05
+    values = []
+    for key in ("min_soc", "min_soc_on_grid"):
+        device.set_actuator_callback(key, lambda value, key=key: values.append((key, value)) or True)
+    device.on_message(None, None, message("min_soc", 10))
+    device.on_message(None, None, message(value=20))
+    device.on_message(None, None, message("min_soc", 11))
+    wait_for_debounce(device)
+    assert sorted(values) == [("min_soc", 11), ("min_soc_on_grid", 20)]
+
+
+def test_value_arriving_during_write_runs_once_after_it(device):
+    device.command_debounce_s = 0.05
+    started, release = threading.Event(), threading.Event()
+    values = []
+
+    def setter(value):
+        values.append(value)
+        if value == 10:
+            started.set()
+            assert release.wait(2)
+        return True
+
+    device.set_actuator_callback("min_soc_on_grid", setter)
+    device.on_message(None, None, message(value=10))
+    try:
+        assert started.wait(2)
+        for value in (11, 12):
+            device.on_message(None, None, message(value=value))
+        threading.Event().wait(0.12)
+        device.on_message(None, None, message(value=13))
+    finally:
+        release.set()
+    wait_for_debounce(device)
+    assert values == [10, 13]
+
+
+def test_switch_commands_are_not_debounced(device):
+    device.command_debounce_s = 10
+    device.entities["switch"] = {"charging": {}}
+    applied = threading.Event()
+    device.set_actuator_callback("charging", lambda value: applied.set() or True)
+    device.on_message(None, None, message("charging", "ON"))
+    assert applied.wait(1)
+
+
+@pytest.mark.parametrize("failure", [False, None, RuntimeError("link lost")])
+def test_failed_command_republishes_fresh_read(device, failure, caplog):
+    def setter(value):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    device.command_debounce_s = 0
+    device.set_actuator_callback("min_soc_on_grid", setter, 42, refresh=lambda: 42)
+    device.client.publish.reset_mock()
+    device.on_message(None, None, message(value=100))
+    wait_for_debounce(device)
+    assert device.state["min_soc_on_grid"] == 42
+    device.client.publish.assert_called_once_with(
+        "homeassistant/number/inverter_test/min_soc_on_grid/state", 42, retain=True,
+    )
+    assert "min_soc_on_grid=100" in caplog.text
+
+
+def test_unconfirmed_write_is_not_published(device):
+    device.command_debounce_s = 0
+    device.set_actuator_callback("min_soc_on_grid", lambda value: None, 50)
+    device.client.publish.reset_mock()
+    device.on_message(None, None, message())
+    wait_for_debounce(device)
+    assert device.state["min_soc_on_grid"] == 50
+    device.client.publish.assert_not_called()
+
+
+def test_disconnect_drops_pending_debounced_command(device, caplog):
+    device.command_debounce_s = 10
+    values = []
+    device.set_actuator_callback("min_soc_on_grid", lambda value: values.append(value) or True)
+    device.on_message(None, None, message(value=10))
+    device.disconnect()
+    assert values == []
+    assert "min_soc_on_grid" in caplog.text
+    assert not any(c.args[0].endswith("/state") for c in device.client.publish.call_args_list)
+
+
+def test_set_actuator_value_ignores_none(device):
+    device.set_actuator_value("min_soc_on_grid", 42)
+    device.client.publish.reset_mock()
+    assert device.set_actuator_value("min_soc_on_grid", None) is False
+    assert device.state["min_soc_on_grid"] == 42
+    device.client.publish.assert_not_called()
+
+
+def test_failed_command_skips_refresh_when_newer_value_is_pending(device):
+    device.command_debounce_s = 0.05
+    started, release = threading.Event(), threading.Event()
+    refreshed = []
+    values = []
+
+    def setter(value):
+        values.append(value)
+        if value == 10:
+            started.set()
+            assert release.wait(2)
+            return False
+        return True
+
+    device.set_actuator_callback("min_soc_on_grid", setter, refresh=lambda: refreshed.append(True) or 42)
+    device.on_message(None, None, message(value=10))
+    try:
+        assert started.wait(2)
+        device.on_message(None, None, message(value=13))
+        threading.Event().wait(0.12)
+    finally:
+        release.set()
+    wait_for_debounce(device)
+    assert values == [10, 13]
+    assert refreshed == []
+    assert device.state["min_soc_on_grid"] == 13
+
+
+def test_debounced_command_uses_callback_registered_after_reconnect(device):
+    device.command_debounce_s = 0.05
+    values = []
+    device.set_actuator_callback("min_soc_on_grid", lambda value: values.append(("old", value)) or True)
+    device.on_message(None, None, message(value=13))
+    device.set_actuator_callback("min_soc_on_grid", lambda value: values.append(("new", value)) or True)
+    wait_for_debounce(device)
+    assert values == [("new", 13)]
