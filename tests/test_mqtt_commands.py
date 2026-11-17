@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import call
 
@@ -512,3 +513,34 @@ def test_async_command_failure_logs_once_with_its_cause(device, failure, caplog)
         assert len(caplog.records) == 1
         assert f"Command min_soc_on_grid=100 failed: {str(failure) or type(failure).__name__}" in caplog.text
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("future_write", [False, True])
+def test_shutdown_logs_cancelled_command(device, monkeypatch, caplog, future_write):
+    monkeypatch.setattr(mqtt_device, "COMMAND_DRAIN_TIMEOUT_S", 0.02)
+    started, release = threading.Event(), threading.Event()
+    write = Future()
+
+    def setter(value):
+        started.set()
+        if future_write:
+            return write
+        assert release.wait(2)
+        return True
+
+    device.set_actuator_callback("min_soc_on_grid", setter)
+    device.on_message(None, None, message())
+    try:
+        assert started.wait(2)
+        with device._command_lock:
+            commands = list(device._commands)
+        device.disconnect()
+    finally:
+        release.set()
+    for command in commands:
+        command.result(timeout=2)
+    assert "Command min_soc_on_grid=100 cancelled (shutdown)" in caplog.text
+    assert "rejected by device" not in caplog.text
+    assert "failed:" not in caplog.text
+    assert "min_soc_on_grid" not in device.state
+    assert not any(c.args[0].endswith("/state") for c in device.client.publish.call_args_list)

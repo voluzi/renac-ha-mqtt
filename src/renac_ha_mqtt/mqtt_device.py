@@ -258,12 +258,15 @@ class RenacMqttDevice:
                     self.client.publish(topic, value, retain=True)
                     return
             reason = "not confirmed (no response)" if result is None else "rejected by device"
-            self.logger.warning("Command %s=%r %s", key, value, reason)
         except Exception as exc:
-            self.logger.warning("Command %s=%r failed: %s", key, value, str(exc) or type(exc).__name__)
+            reason = f"failed: {str(exc) or type(exc).__name__}"
         finally:
             with self._command_lock:
                 self._active_write = None
+        with self._command_lock:
+            if self._cancel_commands:
+                reason = "cancelled (shutdown)"
+        self.logger.warning("Command %s=%r %s", key, value, reason)
         self._refresh_actuator(key)
 
     def _refresh_actuator(self, key: str) -> None:
