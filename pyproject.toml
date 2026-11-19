@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "renac-ha-mqtt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Home Assistant MQTT bridge for RENAC devices"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Helder Moreira", email = "helder.moreira@voluzi.com" }]
 dependencies = [
-    "renac-ble @ git+https://github.com/voluzi/renac-ble.git@main",
+    "renac-ble @ git+https://github.com/voluzi/renac-ble.git@218a220f6f153e9c96dee8d694cc24f526c2b5ce",
     "paho-mqtt>=2.1.0",
 ]
 

@@ -1,5 +1,11 @@
-from renac_ha_mqtt.mqtt_device import RenacMqttDevice, MqttDeviceEntities
 from typing import Optional
+
+from renac_ha_mqtt.mqtt_device import MqttDeviceEntities, RenacMqttDevice, SensorConfig
+
+
+def _measurement(device_class: str, unit: str) -> SensorConfig:
+    return {"device_class": device_class, "unit_of_measurement": unit, "state_class": "measurement"}
+
 
 INVERTER_ENTITIES: MqttDeviceEntities = {
     "number": {
@@ -125,6 +131,18 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
         "force_time_p1_enabled": {},
         "force_time_p2_enabled": {},
         "backup_charge_enabled": {},
+        "bypass_relay": {
+            "entity_category": "config",
+            "enabled_by_default": False,
+            "icon": "mdi:electric-switch",
+        },
+    },
+    "binary_sensor": {
+        "forbid_charge": {},
+        "forbid_discharge": {},
+        "bms_connected": {"device_class": "connectivity", "entity_category": "diagnostic"},
+        "meter1_connected": {"device_class": "connectivity", "entity_category": "diagnostic"},
+        "fault_active": {"device_class": "problem"},
     },
     "select": {
         "work_mode": {
@@ -163,6 +181,40 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
             "device_class": "power",
             "state_class": "measurement",
         },
+        "inverter_state": {
+            "device_class": "enum",
+            "options": [
+                "Wait", "Check", "Normal", "Standby", "Fault", "Permanent",
+                "Update", "EpsCheck", "Eps", "SelfTest", "Idle", "Unknown",
+            ],
+        },
+        "fault_code": {"entity_category": "diagnostic", "has_attributes": True},
+        "battery_voltage": _measurement("voltage", "V"),
+        "battery_current": _measurement("current", "A"),
+        "bms_voltage": _measurement("voltage", "V"),
+        "bms_current": _measurement("current", "A"),
+        "bms_soh": {"unit_of_measurement": "%", "state_class": "measurement", "entity_category": "diagnostic"},
+        "bms_max_charge_a": _measurement("current", "A"),
+        "bms_max_discharge_a": _measurement("current", "A"),
+        "max_cell_v": _measurement("voltage", "V"),
+        "min_cell_v": _measurement("voltage", "V"),
+        "bms_cycles": {"state_class": "total_increasing", "entity_category": "diagnostic"},
+        **{
+            key: _measurement("temperature", "°C")
+            for key in ("internal_temp", "charger_temp", "boost_temp", "inverter_temp",
+                        "bms_temp", "max_cell_t", "min_cell_t")
+        },
+        **{
+            key: {"enabled_by_default": False, "entity_category": "diagnostic"}
+            for key in ("max_cell_v_no", "min_cell_v_no", "max_cell_t_no", "min_cell_t_no", "bms_basic_status")
+        },
+        **{f"inv_{phase}_current": _measurement("current", "A") for phase in "rst"},
+        **{f"inv_{phase}_power": _measurement("power", "W") for phase in "rst"},
+        "inv_ac_power": _measurement("power", "W"),
+        **{f"eps_{phase}_voltage": _measurement("voltage", "V") for phase in "rst"},
+        **{f"eps_{phase}_current": _measurement("current", "A") for phase in "rst"},
+        **{f"eps_{phase}_power": _measurement("power", "W") for phase in "rst"},
+        "eps_frequency": _measurement("frequency", "Hz"),
 
         # TOTAL_ENERGY_BLOCK
         "pv_total_energy": {
