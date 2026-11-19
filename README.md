@@ -123,7 +123,8 @@ fault bits are undocumented.
 
 The **Bypass relay** configuration switch is disabled by default in Home
 Assistant. The bridge reads the setting on connection and during actuator
-polling, and confirms writes before publishing the new state.
+polling (`RENAC_ACTUATOR_POLL_INTERVAL_S`, default 30 s), and confirms writes
+before publishing the new state.
 
 **Warning:** Changing the bypass relay setting changes how the EPS output is
 fed. Before enabling the entity or changing the setting, check how bypass
