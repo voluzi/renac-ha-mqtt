@@ -227,15 +227,15 @@ wheels = [
 
 [[package]]
 name = "renac-ble"
-version = "0.1.0"
-source = { git = "https://github.com/voluzi/renac-ble.git?rev=main#54c0d2da99ce51b34699e101c6b9e0608b08ee48" }
+version = "0.2.0"
+source = { git = "https://github.com/voluzi/renac-ble.git?rev=main#a3884f1edf515d8d82b6d9f43bdc22a11d91e9f1" }
 dependencies = [
     { name = "bleak" },
 ]
 
 [[package]]
 name = "renac-ha-mqtt"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "paho-mqtt" },

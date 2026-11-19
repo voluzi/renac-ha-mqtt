@@ -39,6 +39,7 @@ INVERTER_ADDRS = os.getenv("RENAC_INVERTER_ADDRS", "")
 WALLBOX_ADDRS = os.getenv("RENAC_WALLBOX_ADDRS", "")
 
 POLL_INTERVAL_S = float(os.getenv("RENAC_POLL_INTERVAL_S", "5"))
+INVERTER_DIAGNOSTICS_INTERVAL_S = float(os.getenv("RENAC_INVERTER_DIAGNOSTICS_INTERVAL_S", "30"))
 # Wallbox status is read on demand this often, on top of its own pushes
 WALLBOX_STATUS_INTERVAL_S = float(os.getenv("RENAC_WALLBOX_STATUS_INTERVAL_S", "10"))
 # Separate interval for refreshing actuator states
@@ -121,7 +122,7 @@ def make_wallbox_callback(ble_addr: str) -> Callable[[Dict[str, Any]], None]:
         if dev is None:
             # Build device on first telemetry (we need serial/model)
             dev = RenacWallboxDevice(
-                device_name=f"RENAC Wallbox",
+                device_name="RENAC Wallbox",
                 serial_number=parsed.get("sn"),
                 ble_address=ble_addr,
                 model=parsed.get("model"),
@@ -324,10 +325,11 @@ async def run_inverter_task(ble_addr: str) -> None:
 
             loop = asyncio.get_running_loop()
 
-            def wire(key, setter, refresh, initial):
+            def wire(key, setter, refresh, initial, *, debounce=False):
                 mqtt_dev.set_actuator_callback(
                     key, wrap_async_callback(loop, setter), initial,
                     refresh=wrap_async_refresh(loop, refresh),
+                    debounce=debounce,
                 )
 
             for key in ("max_charge_current", "max_discharge_current", "min_soc",
@@ -348,6 +350,17 @@ async def run_inverter_task(ble_addr: str) -> None:
 
             wire("work_mode", _set_work_mode, _get_work_mode, await _get_work_mode())
 
+            async def _set_bypass_relay(value: str) -> bool | None:
+                if value not in ("ON", "OFF"):
+                    return False
+                return await inverter.set_bypass_relay_enabled(value == "ON")
+
+            async def _get_bypass_relay() -> str | None:
+                enabled = await inverter.get_bypass_relay_enabled()
+                return None if enabled is None else ("ON" if enabled else "OFF")
+
+            wire("bypass_relay", _set_bypass_relay, _get_bypass_relay, await _get_bypass_relay(), debounce=True)
+
             def period_refresh(get_period, field: str) -> Callable[[], Awaitable[Any]]:
                 async def refresh() -> Any:
                     return _period_to_mqtt_state(await get_period()).get(field)
@@ -364,6 +377,7 @@ async def run_inverter_task(ble_addr: str) -> None:
                          period_refresh(get_period, field), initial.get(field))
 
             last_actuator_poll = time.monotonic()
+            next_diagnostics_poll = last_actuator_poll
 
             # Poll & publish inverter overview periodically
             while True:
@@ -372,10 +386,29 @@ async def run_inverter_task(ble_addr: str) -> None:
                 overview = await inverter.get_power_and_energy_overview()
                 if overview:
                     mqtt_dev.set_sensor_value(overview)
+                status = await inverter.get_inverter_status()
+                if status:
+                    mqtt_dev.set_sensor_value(status)
 
                 now = time.monotonic()
+                if now >= next_diagnostics_poll:
+                    next_diagnostics_poll = now + INVERTER_DIAGNOSTICS_INTERVAL_S
+                    diagnostics = await inverter.get_inverter_diagnostics()
+                    if diagnostics:
+                        readings = diagnostics.copy()
+                        words = readings.pop("fault_words", None)
+                        if words is not None:
+                            readings["fault_code"] = ",".join(
+                                f"{index:02}:0x{word:04X}" for index, word in enumerate(words, 1) if word
+                            ) or "none"
+                            mqtt_dev.set_sensor_attributes("fault_code", {
+                                f"fault_{index}": word for index, word in enumerate(words, 1)
+                            })
+                        mqtt_dev.set_sensor_value(readings)
+
                 if now - last_actuator_poll >= ACTUATOR_POLL_INTERVAL_S:
                     last_actuator_poll = now
+                    mqtt_dev.set_actuator_value("bypass_relay", await _get_bypass_relay())
                     mqtt_dev.set_actuator_value(
                         "max_charge_current",
                         await inverter.get_max_charge_current(),

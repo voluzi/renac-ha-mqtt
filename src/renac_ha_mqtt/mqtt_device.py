@@ -22,6 +22,15 @@ class SensorConfig(TypedDict, total=False):
     unit_of_measurement: str
     device_class: str
     state_class: str
+    options: list[str]
+    entity_category: str
+    enabled_by_default: bool
+    has_attributes: bool
+
+
+class BinarySensorConfig(TypedDict, total=False):
+    device_class: str
+    entity_category: str
 
 
 class NumberConfig(TypedDict, total=False):
@@ -38,10 +47,12 @@ class SelectConfig(TypedDict, total=False):
 
 class SwitchConfig(TypedDict, total=False):
     device_class: str
+    entity_category: str
 
 
 class MqttDeviceEntities(TypedDict, total=False):
     sensor: Dict[str, SensorConfig]
+    binary_sensor: dict[str, BinarySensorConfig]
     number: Dict[str, NumberConfig]
     select: Dict[str, SelectConfig]
     switch: Dict[str, SwitchConfig]
@@ -69,8 +80,10 @@ class RenacMqttDevice:
         self.mqtt_user = mqtt_user
         self.mqtt_password = mqtt_password
         self.state = {}
+        self._sensor_attributes: dict[str, dict[str, Any]] = {}
         self._actuator_callbacks: Dict[str, ActuatorCallback] = {}
         self._actuator_refreshers: Dict[str, ActuatorRefresh] = {}
+        self._debounced_actuators: set[str] = set()
         self.command_debounce_s = COMMAND_DEBOUNCE_S
         self._pending_values: Dict[str, ActuatorPayload] = {}
         self._debounce_timers: Dict[str, threading.Timer] = {}
@@ -165,6 +178,8 @@ class RenacMqttDevice:
                     entity_type = self.get_entity_type(key) or "sensor"
                     topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
                     self.publish(topic, value, retain=True)
+                for key, attributes in self._sensor_attributes.items():
+                    self.publish(self._attributes_topic(key), attributes, retain=True)
             else:
                 self.logger.error(f"❌ MQTT connect failed, code {reason_code}")
 
@@ -188,7 +203,9 @@ class RenacMqttDevice:
                 with self._command_lock:
                     if self._stopping:
                         return
-                    if self.command_debounce_s > 0 and self.get_entity_type(key) in ("number", "select"):
+                    if self.command_debounce_s > 0 and (
+                        key in self._debounced_actuators or self.get_entity_type(key) in ("number", "select")
+                    ):
                         if key in self._pending_values:
                             self._superseded[key] = self._superseded.get(key, 0) + 1
                         self._pending_values[key] = value
@@ -307,24 +324,33 @@ class RenacMqttDevice:
         self.logger.warning("Could not refresh %s after failed command", key)
 
     def _register_sensors(self):
-        for key, sensor in self.entities.get("sensor", {}).items():
-            base_topic = f"homeassistant/sensor/{self.device_id}/{key}"
-            config = {
-                "name": f"{self.device_name} {key.replace('_', ' ').title()}",
-                "state_topic": f"{base_topic}/state",
-                "unique_id": f"{self.device_id}_{key}",
-                "availability_topic": f"homeassistant/{self.device_id}/availability",
-                "payload_available": "online",
-                "payload_not_available": "offline",
-                "device": {
-                    "identifiers": [self.device_id],
-                    "name": self.device_name,
-                    "manufacturer": "RENAC",
-                    "model": self.device_model,
-                },
-            }
-            config.update(sensor)
-            self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
+        groups = (
+            ("sensor", self.entities.get("sensor", {})),
+            ("binary_sensor", self.entities.get("binary_sensor", {})),
+        )
+        for entity_type, sensors in groups:
+            for key, sensor in sensors.items():
+                base_topic = f"homeassistant/{entity_type}/{self.device_id}/{key}"
+                config = {
+                    "name": f"{self.device_name} {key.replace('_', ' ').title()}",
+                    "state_topic": f"{base_topic}/state",
+                    "unique_id": f"{self.device_id}_{key}",
+                    "availability_topic": f"homeassistant/{self.device_id}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                    "device": {
+                        "identifiers": [self.device_id],
+                        "name": self.device_name,
+                        "manufacturer": "RENAC",
+                        "model": self.device_model,
+                    },
+                    **sensor,
+                }
+                if config.pop("has_attributes", False):
+                    config["json_attributes_topic"] = self._attributes_topic(key)
+                if entity_type == "binary_sensor":
+                    config.update(payload_on="ON", payload_off="OFF")
+                self.client.publish(f"{base_topic}/config", json.dumps(config), retain=True)
 
     def _register_actuators(self):
         for key, number in self.entities.get("number", {}).items():
@@ -408,24 +434,33 @@ class RenacMqttDevice:
         ``key_or_dict`` may be either a single sensor key or a mapping of
         keys to values. Only changed values are published.
         """
+        values = key_or_dict if isinstance(key_or_dict, dict) else {key_or_dict: value}
         updates = {}
         with self._command_lock:
-            if isinstance(key_or_dict, dict):
-                for k, v in key_or_dict.items():
-                    if self._set_state(k, v):
-                        updates[k] = v
-            else:
-                if self._set_state(key_or_dict, value):
-                    updates[key_or_dict] = value
-
-            for k, v in updates.items():
-                topic = f"homeassistant/sensor/{self.device_id}/{k}/state"
-                self.client.publish(topic, v, retain=True)
+            for key, reading in values.items():
+                entity_type = "sensor"
+                if key in self.entities.get("binary_sensor", {}):
+                    entity_type = "binary_sensor"
+                    if isinstance(reading, bool):
+                        reading = "ON" if reading else "OFF"
+                if self._set_state(key, reading):
+                    topic = f"homeassistant/{entity_type}/{self.device_id}/{key}/state"
+                    self.client.publish(topic, reading, retain=True)
+                    updates[key] = reading
 
         if updates:
             self.logger.debug(f"📤 Published sensor updates: {updates}")
 
         return bool(updates)
+
+    def _attributes_topic(self, key: str) -> str:
+        return f"homeassistant/sensor/{self.device_id}/{key}/attributes"
+
+    def set_sensor_attributes(self, key: str, attributes: dict[str, Any]) -> None:
+        with self._command_lock:
+            if self._sensor_attributes.get(key) != attributes:
+                self._sensor_attributes[key] = attributes.copy()
+                self.publish(self._attributes_topic(key), attributes, retain=True)
 
     def get_entity_type(self, key: str) -> Optional[str]:
         """Return the entity category for ``key`` if present."""
@@ -436,9 +471,13 @@ class RenacMqttDevice:
 
     def set_actuator_callback(self, key: str, callback: ActuatorCallback,
                               value: Optional[Union[int, float, str, bool]] = None,
-                              *, refresh: Optional[ActuatorRefresh] = None):
+                              *, refresh: Optional[ActuatorRefresh] = None, debounce: bool = False):
         with self._command_lock:
             self._actuator_callbacks[key] = callback
+            if debounce:
+                self._debounced_actuators.add(key)
+            else:
+                self._debounced_actuators.discard(key)
             if refresh is None:
                 self._actuator_refreshers.pop(key, None)
             else:

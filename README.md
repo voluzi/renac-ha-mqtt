@@ -94,11 +94,34 @@ Set `LOG_LEVEL` to control bridge and RENAC library logging (default: `INFO`).
 Use `LOG_LEVEL=DEBUG` to include BLE request and response hex dumps; third-party
 BLE and MQTT loggers stay at INFO.
 
-Number and select commands wait for a quiet interval before applying the latest
-value per entity. Set `RENAC_COMMAND_DEBOUNCE_S` to change this interval (default:
-`1.0` seconds), or `0` to apply every command immediately. Switch commands always
-apply immediately. If a write fails, the bridge reads and republishes the current
-device value when available.
+Number, select and bypass relay commands wait for a quiet interval before
+applying the latest value per entity. Set `RENAC_COMMAND_DEBOUNCE_S` to change
+this interval (default: `1.0` seconds), or `0` to apply every command immediately.
+Other switches apply immediately. If a write fails, the bridge reads and
+republishes the current device value when available.
+
+### N3 HV inverter entities
+
+The bridge exposes the inverter operating state, charge and discharge
+restrictions, BMS and meter connection status, battery and BMS readings,
+and per-phase inverter AC and EPS telemetry. The BMS cell index and basic
+status entities are disabled by default.
+
+Inverter state and live measurements use `RENAC_POLL_INTERVAL_S` (default:
+5 seconds). Inverter temperatures, BMS cell data and fault words use
+`RENAC_INVERTER_DIAGNOSTICS_INTERVAL_S` (default: 30 seconds). Battery and BMS
+readings that share a register block with battery power and SoC use the
+faster poll.
+
+**Fault active** is on only when the inverter reports `Fault` or `Permanent`.
+The diagnostic **Fault code** sensor lists non-zero fault words as numbered
+hex values (for example, `07:0x0018`), or displays `none` when all words are
+zero. Its attributes contain all 16 raw words. The meanings of individual
+fault bits are undocumented.
+
+The **Bypass relay** configuration switch reads the inverter setting on
+connection and during actuator polling. The bridge confirms changes using
+the inverter's write echo or a readback before publishing the new state.
 
 ---
 
