@@ -48,6 +48,8 @@ class SelectConfig(TypedDict, total=False):
 class SwitchConfig(TypedDict, total=False):
     device_class: str
     entity_category: str
+    enabled_by_default: bool
+    icon: str
 
 
 class MqttDeviceEntities(TypedDict, total=False):

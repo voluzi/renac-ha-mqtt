@@ -111,17 +111,23 @@ Inverter state and live measurements use `RENAC_POLL_INTERVAL_S` (default:
 5 seconds). Inverter temperatures, BMS cell data and fault words use
 `RENAC_INVERTER_DIAGNOSTICS_INTERVAL_S` (default: 30 seconds). Battery and BMS
 readings that share a register block with battery power and SoC use the
-faster poll.
+faster poll. After three consecutive failures, a telemetry block uses the
+diagnostics interval until it succeeds.
 
 **Fault active** is on only when the inverter reports `Fault` or `Permanent`.
+An unrecognized state code is logged and displayed as `Unknown`.
 The diagnostic **Fault code** sensor lists non-zero fault words as numbered
 hex values (for example, `07:0x0018`), or displays `none` when all words are
 zero. Its attributes contain all 16 raw words. The meanings of individual
 fault bits are undocumented.
 
-The **Bypass relay** configuration switch reads the inverter setting on
-connection and during actuator polling. The bridge confirms changes using
-the inverter's write echo or a readback before publishing the new state.
+The **Bypass relay** configuration switch is disabled by default in Home
+Assistant. The bridge reads the setting on connection and during actuator
+polling, and confirms writes before publishing the new state.
+
+**Warning:** Changing the bypass relay setting changes how the EPS output is
+fed. Before enabling the entity or changing the setting, check how bypass
+affects the loads connected to your EPS output.
 
 ---
 

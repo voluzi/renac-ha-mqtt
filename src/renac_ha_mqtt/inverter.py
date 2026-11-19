@@ -131,7 +131,11 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
         "force_time_p1_enabled": {},
         "force_time_p2_enabled": {},
         "backup_charge_enabled": {},
-        "bypass_relay": {"entity_category": "config"},
+        "bypass_relay": {
+            "entity_category": "config",
+            "enabled_by_default": False,
+            "icon": "mdi:electric-switch",
+        },
     },
     "binary_sensor": {
         "forbid_charge": {},
@@ -181,7 +185,7 @@ INVERTER_ENTITIES: MqttDeviceEntities = {
             "device_class": "enum",
             "options": [
                 "Wait", "Check", "Normal", "Standby", "Fault", "Permanent",
-                "Update", "EpsCheck", "Eps", "SelfTest", "Idle",
+                "Update", "EpsCheck", "Eps", "SelfTest", "Idle", "Unknown",
             ],
         },
         "fault_code": {"entity_category": "diagnostic", "has_attributes": True},

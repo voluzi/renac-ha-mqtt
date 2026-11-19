@@ -297,6 +297,7 @@ def _period_setter(get_period, set_period, field: str) -> Callable[[Any], Awaita
 async def run_inverter_task(ble_addr: str) -> None:
     """Loop to keep an inverter connected, publish telemetry and wire actuators."""
     inverter = RenacInverterBLE(ble_addr)
+    inverter.telemetry_retry_interval_s = INVERTER_DIAGNOSTICS_INTERVAL_S
 
     while not shutdown_event.is_set():
         try:

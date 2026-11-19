@@ -42,7 +42,7 @@ def test_inverter_discovery_describes_measurements_diagnostics_and_bypass(mqtt_c
         assert state["device_class"] == "enum"
         assert state["options"] == [
             "Wait", "Check", "Normal", "Standby", "Fault", "Permanent",
-            "Update", "EpsCheck", "Eps", "SelfTest", "Idle",
+            "Update", "EpsCheck", "Eps", "SelfTest", "Idle", "Unknown",
         ]
         assert "state_class" not in state and "unit_of_measurement" not in state
         code = config["sensor", "fault_code"]
@@ -58,6 +58,8 @@ def test_inverter_discovery_describes_measurements_diagnostics_and_bypass(mqtt_c
 
         relay = config["switch", "bypass_relay"]
         assert relay["entity_category"] == "config"
+        assert relay["enabled_by_default"] is False
+        assert relay["icon"] == "mdi:electric-switch"
         assert relay["command_topic"] == "homeassistant/switch/inverter_test/bypass_relay/set"
         assert relay["state_topic"] == "homeassistant/switch/inverter_test/bypass_relay/state"
         assert (relay["payload_on"], relay["payload_off"]) == ("ON", "OFF")
@@ -82,6 +84,7 @@ def test_inverter_poll_separates_fault_code_from_alarm_and_bypass_is_confirmed(
         inverter.get_inverter_status.side_effect = [
             {"inverter_state": "Normal", "fault_active": False, "forbid_charge": True},
             {"inverter_state": "Fault", "fault_active": True, "forbid_charge": False},
+            {"inverter_state": "Unknown", "fault_active": False, "forbid_charge": False},
         ]
         fault_words = (0, 0, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0x8001)
         inverter.get_inverter_diagnostics.return_value = {"fault_words": fault_words}
@@ -89,7 +92,7 @@ def test_inverter_poll_separates_fault_code_from_alarm_and_bypass_is_confirmed(
         hold = asyncio.Event()
 
         async def overview():
-            if inverter.get_power_and_energy_overview.await_count == 3:
+            if inverter.get_power_and_energy_overview.await_count == 4:
                 ready.set()
                 await hold.wait()
 
@@ -101,18 +104,24 @@ def test_inverter_poll_separates_fault_code_from_alarm_and_bypass_is_confirmed(
             dev = bridge.inverter_mqtt_by_addr["ble-test"]
             dev.command_debounce_s = 0.1
             client = dev.client
-            for key, state in (("fault_active", "OFF"), ("fault_active", "ON"),
-                               ("forbid_charge", "ON"), ("forbid_charge", "OFF")):
+            for state in ("ON", "OFF"):
                 client.publish.assert_any_call(
-                    f"homeassistant/binary_sensor/inverter_test/{key}/state", state, retain=True,
+                    "homeassistant/binary_sensor/inverter_test/forbid_charge/state", state, retain=True,
                 )
+            alarm_topic = "homeassistant/binary_sensor/inverter_test/fault_active/state"
+            assert [call.args[1] for call in client.publish.call_args_list if call.args[0] == alarm_topic] == [
+                "OFF", "ON", "OFF",
+            ]
+            client.publish.assert_any_call(
+                "homeassistant/sensor/inverter_test/inverter_state/state", "Unknown", retain=True,
+            )
             client.publish.assert_any_call(
                 "homeassistant/sensor/inverter_test/fault_code/state", "07:0x0018,16:0x8001", retain=True,
             )
             client.publish.assert_any_call(
                 "homeassistant/switch/inverter_test/bypass_relay/state", "OFF", retain=True,
             )
-            assert inverter.get_inverter_status.await_count == 2
+            assert inverter.get_inverter_status.await_count == 3
             inverter.get_inverter_diagnostics.assert_awaited_once()
 
             attrs_topic = "homeassistant/sensor/inverter_test/fault_code/attributes"
