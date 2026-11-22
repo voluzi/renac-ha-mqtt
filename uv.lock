@@ -227,8 +227,8 @@ wheels = [
 
 [[package]]
 name = "renac-ble"
-version = "0.2.0"
-source = { git = "https://github.com/voluzi/renac-ble.git?rev=218a220f6f153e9c96dee8d694cc24f526c2b5ce#218a220f6f153e9c96dee8d694cc24f526c2b5ce" }
+version = "0.2.1"
+source = { git = "https://github.com/voluzi/renac-ble.git?rev=9140ad9b752d0e0d9c593d24466277be316fc139#9140ad9b752d0e0d9c593d24466277be316fc139" }
 dependencies = [
     { name = "bleak" },
 ]
@@ -250,7 +250,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "paho-mqtt", specifier = ">=2.1.0" },
-    { name = "renac-ble", git = "https://github.com/voluzi/renac-ble.git?rev=218a220f6f153e9c96dee8d694cc24f526c2b5ce" },
+    { name = "renac-ble", git = "https://github.com/voluzi/renac-ble.git?rev=9140ad9b752d0e0d9c593d24466277be316fc139" },
 ]
 
 [package.metadata.requires-dev]
