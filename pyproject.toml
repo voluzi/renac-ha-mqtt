@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Helder Moreira", email = "helder.moreira@voluzi.com" }]
 dependencies = [
-    "renac-ble @ git+https://github.com/voluzi/renac-ble.git@218a220f6f153e9c96dee8d694cc24f526c2b5ce",
+    "renac-ble @ git+https://github.com/voluzi/renac-ble.git@9140ad9b752d0e0d9c593d24466277be316fc139",
     "paho-mqtt>=2.1.0",
 ]
 
